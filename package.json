@@ -1,0 +1,19 @@
+{
+  "name": "relay-web-proxy",
+  "version": "2.0.0",
+  "description": "A web proxy with path-encoded URLs, cookie support and JavaScript-aware rewriting",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "dependencies": {
+    "acorn": "^8.12.0",
+    "cheerio": "^1.0.0",
+    "undici": "^6.19.0",
+    "ws": "^8.18.0"
+  },
+  "license": "MIT"
+}

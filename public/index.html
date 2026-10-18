@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Relay Browse</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Figtree:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#eef1f6; --surface:#ffffff; --ink:#0f1a2e; --muted:#5a6579; --line:#d8dee8;
+  --accent:#3447ff; --accent-ink:#ffffff; --soft:#e2e7ff; --danger:#c0392b;
+  --display:'Bricolage Grotesque','Trebuchet MS',system-ui,sans-serif;
+  --body:'Figtree',system-ui,-apple-system,'Segoe UI',sans-serif;
+}
+@media (prefers-color-scheme: dark){
+  :root{--bg:#0b1220;--surface:#121b2e;--ink:#e8edf8;--muted:#97a3bb;--line:#24304a;--accent:#7d8bff;--accent-ink:#0b1220;--soft:#1b2547;--danger:#ff8a7a}
+}
+*,*::before,*::after{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.6 var(--body);-webkit-font-smoothing:antialiased}
+:focus-visible{outline:3px solid var(--accent);outline-offset:2px;border-radius:8px}
+button{font:inherit;color:inherit}
+[hidden]{display:none !important}
+
+/* home */
+.home{min-height:100%;display:flex;flex-direction:column;justify-content:center;max-width:720px;margin:0 auto;padding:48px 24px}
+.brand{display:flex;align-items:center;gap:10px;font:800 1.4rem var(--display);letter-spacing:-0.03em;margin-bottom:44px}
+.brand svg{width:26px;height:26px}
+h1{font:800 clamp(2.4rem,7vw,4rem)/1.04 var(--display);letter-spacing:-0.025em;margin:0 0 16px}
+.lead{color:var(--muted);font-size:1.12rem;max-width:48ch;margin:0 0 32px}
+.go{display:flex;gap:10px;background:var(--surface);border:1.5px solid var(--ink);border-radius:16px;padding:8px;box-shadow:6px 6px 0 var(--ink)}
+.go input{flex:1;min-width:0;border:none;background:transparent;color:var(--ink);font:500 1.05rem var(--body);padding:12px 14px}
+.go input:focus-visible{outline:none}
+.go:focus-within{outline:3px solid var(--accent);outline-offset:3px}
+.btn{border:none;background:var(--accent);color:var(--accent-ink);font:600 1rem var(--body);padding:12px 22px;border-radius:10px;cursor:pointer}
+.btn:hover{filter:brightness(1.08)}
+.hint{min-height:1.6em;margin:14px 4px 0;color:var(--danger);font-size:.95rem}
+.recent{margin-top:20px;display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.recent span{color:var(--muted);font-size:.92rem;margin-right:4px}
+.chip{border:1.5px solid var(--line);background:transparent;border-radius:999px;padding:6px 14px;font-size:.92rem;cursor:pointer;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chip:hover{border-color:var(--ink)}
+.note{margin-top:48px;padding-top:20px;border-top:1px solid var(--line);color:var(--muted);font-size:.93rem;max-width:60ch}
+
+/* browser shell */
+.shell{height:100dvh;display:flex;flex-direction:column}
+.bar{display:flex;align-items:center;gap:6px;padding:8px 10px;background:var(--surface);border-bottom:1px solid var(--line);position:relative}
+.tool{width:38px;height:38px;border:none;background:transparent;border-radius:10px;cursor:pointer;display:grid;place-items:center;color:var(--ink)}
+.tool:hover{background:var(--bg)}
+.tool svg{width:20px;height:20px}
+.addr{flex:1;min-width:0;display:flex}
+.addr input{flex:1;min-width:0;border:1.5px solid var(--line);background:var(--bg);color:var(--ink);border-radius:10px;padding:8px 14px;font:500 .95rem var(--body)}
+.addr input:focus{border-color:var(--accent);outline:none}
+.progress{position:absolute;left:0;bottom:-1px;height:3px;width:100%;background:var(--accent);transform-origin:left;transform:scaleX(0);opacity:0}
+.progress.on{opacity:1;animation:load 2.2s ease-out forwards}
+@keyframes load{from{transform:scaleX(0)}to{transform:scaleX(.9)}}
+iframe{flex:1;width:100%;border:0;background:#fff}
+@media (prefers-reduced-motion:reduce){.progress.on{animation:none;transform:scaleX(.6)}}
+@media (max-width:520px){.go{flex-direction:column;box-shadow:4px 4px 0 var(--ink)}}
+</style>
+</head>
+<body>
+
+<main class="home" id="home">
+  <div class="brand">
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="5" cy="12" r="3" fill="currentColor"/><circle cx="19" cy="12" r="3" fill="var(--accent)"/><path d="M8 12h8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-dasharray="1 3.2"/></svg>
+    Relay Browse
+  </div>
+  <h1>Open any page through your own server.</h1>
+  <p class="lead">Type an address or a search. The page loads through this server, so the site sees the server instead of your device.</p>
+
+  <form class="go" id="goForm" role="search">
+    <input id="homeInput" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Enter a web address or search" aria-label="Web address or search">
+    <button class="btn" type="submit">Open</button>
+  </form>
+  <p class="hint" id="hint" role="status"></p>
+
+  <div class="recent" id="recent" hidden></div>
+  <div class="recent" id="examples"><span>Try</span>
+    <button class="chip" type="button" data-go="https://example.com">example.com</button>
+    <button class="chip" type="button" data-go="https://en.wikipedia.org">wikipedia.org</button>
+    <button class="chip" type="button" data-go="https://news.ycombinator.com">news.ycombinator.com</button>
+  </div>
+
+  <p class="note">Simple sites work best. Pages that need sign-in, video streaming, or heavy scripts may not load correctly.</p>
+</main>
+
+<div class="shell" id="shell" hidden>
+  <div class="bar">
+    <button class="tool" id="homeBtn" type="button" aria-label="Home" title="Home"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11l8-7 8 7v9a1 1 0 0 1-1 1h-4v-6H9v6H5a1 1 0 0 1-1-1z"/></svg></button>
+    <button class="tool" id="backBtn" type="button" aria-label="Back" title="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg></button>
+    <button class="tool" id="fwdBtn" type="button" aria-label="Forward" title="Forward"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg></button>
+    <button class="tool" id="reloadBtn" type="button" aria-label="Reload" title="Reload"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.6-5.9M20 4v5h-5"/></svg></button>
+    <form class="addr" id="addrForm"><input id="addr" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Address"></form>
+    <div class="progress" id="progress" aria-hidden="true"></div>
+  </div>
+  <iframe id="view" title="Proxied page" referrerpolicy="no-referrer"></iframe>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
