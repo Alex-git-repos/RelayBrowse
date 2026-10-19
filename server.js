@@ -11,7 +11,7 @@
  * Environment variables (all optional):
  *   PORT             port to listen on                     (default 3000)
  *   HOST             interface to bind                     (default 127.0.0.1)
- *   PROXY_PASSWORD   require HTTP Basic auth (any username) (default: off)
+ *   AUTH_TOKEN       secret token; visiting /<token> sets the auth cookie
  *   RATE_LIMIT       max requests per IP per minute        (default 600)
  *   TRUST_PROXY      "1" to read client IP from X-Forwarded-For
  *   ALLOW_PRIVATE    "1" to allow private/loopback targets (testing only!)
@@ -29,7 +29,7 @@ const cheerio = require('cheerio');
 
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || '127.0.0.1';
-const PASSWORD = process.env.PROXY_PASSWORD || '';
+const AUTH_TOKEN = process.env.AUTH_TOKEN || '3c94e25a79b587b24a0cd93294d6ff63dc8c9b100dcb769a2decee0450dc7bda';
 const RATE_LIMIT = Number(process.env.RATE_LIMIT) || 600;
 const TRUST_PROXY = process.env.TRUST_PROXY === '1';
 const ALLOW_PRIVATE = process.env.ALLOW_PRIVATE === '1';
@@ -383,14 +383,32 @@ function serveStatic(pathname, res) {
   });
 }
 
+const sha = (v) => crypto.createHash('sha256').update(String(v)).digest();
+const safeEqual = (a, b) => crypto.timingSafeEqual(sha(a), sha(b));
+
+function getCookie(req, name) {
+  for (const part of (req.headers.cookie || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0 && part.slice(0, i).trim() === name) return part.slice(i + 1).trim();
+  }
+  return '';
+}
+
 function authorised(req) {
-  if (!PASSWORD) return true;
-  const m = /^Basic (.+)$/.exec(req.headers.authorization || '');
-  if (!m) return false;
-  const given = Buffer.from(m[1], 'base64').toString().split(':').slice(1).join(':');
-  const a = crypto.createHash('sha256').update(given).digest();
-  const b = crypto.createHash('sha256').update(PASSWORD).digest();
-  return crypto.timingSafeEqual(a, b);
+  return safeEqual(getCookie(req, 'auth'), AUTH_TOKEN);
+}
+
+function isSecure(req) {
+  return Boolean(req.socket.encrypted) || (TRUST_PROXY && /^https/i.test(req.headers['x-forwarded-proto'] || ''));
+}
+
+/** Plain decoy page shown to anyone without the auth cookie. */
+function defaultPage(res) {
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Welcome</title>
+<style>body{font:17px/1.6 system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#fff;color:#222}main{text-align:center;padding:32px}h1{font-size:1.5rem;margin:0 0 8px}p{margin:0;color:#777}</style>
+<main><h1>Welcome</h1><p>There is nothing to see here yet.</p></main>`);
 }
 
 const hits = new Map();
@@ -404,18 +422,23 @@ function rateLimited(ip) {
 
 const server = http.createServer(async (req, res) => {
   try {
-    if (!authorised(req)) {
-      res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="Relay proxy"', 'Content-Type': 'text/plain' });
-      return res.end('Password required.');
-    }
     const ip = (TRUST_PROXY && (req.headers['x-forwarded-for'] || '').split(',')[0].trim()) || req.socket.remoteAddress || 'unknown';
     if (rateLimited(ip)) {
       res.writeHead(429, { 'Retry-After': '60', 'Content-Type': 'text/plain' });
       return res.end('Too many requests. Try again in a minute.');
     }
     const url = new URL(req.url, 'http://localhost');
-    if (url.pathname === '/proxy') return await handleProxy(req, res, url);
     if (url.pathname === '/health') { res.writeHead(200, { 'Content-Type': 'text/plain' }); return res.end('ok'); }
+    if (url.pathname === '/' + AUTH_TOKEN) {
+      res.writeHead(302, {
+        'Set-Cookie': `auth=${AUTH_TOKEN}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax${isSecure(req) ? '; Secure' : ''}`,
+        Location: '/',
+        'Cache-Control': 'no-store',
+      });
+      return res.end();
+    }
+    if (!authorised(req)) return defaultPage(res);
+    if (url.pathname === '/proxy') return await handleProxy(req, res, url);
     return serveStatic(url.pathname, res);
   } catch (err) {
     if (!res.headersSent) errorPage(res, err.status || 500, 'Something went wrong', err.message || 'Unexpected error.');
@@ -426,5 +449,5 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   console.log(`Relay web proxy running at http://${HOST}:${PORT}`);
   if (ALLOW_PRIVATE) console.warn('WARNING: ALLOW_PRIVATE=1, private network targets are reachable. Use for testing only.');
-  if (HOST !== '127.0.0.1' && !PASSWORD) console.warn('WARNING: listening publicly without PROXY_PASSWORD. Anyone can use this proxy.');
+  if (!process.env.AUTH_TOKEN) console.warn('WARNING: using the built-in default AUTH_TOKEN. Set AUTH_TOKEN in the environment.');
 });
