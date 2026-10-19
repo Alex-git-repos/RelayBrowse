@@ -81,9 +81,11 @@
   $('goForm').addEventListener('submit', function (e) { e.preventDefault(); submit($('homeInput').value, true); });
   $('addrForm').addEventListener('submit', function (e) { e.preventDefault(); submit(addr.value, false); });
   $('homeBtn').addEventListener('click', goHome);
-  $('backBtn').addEventListener('click', function () { try { view.contentWindow.history.back(); } catch (e) {} });
-  $('fwdBtn').addEventListener('click', function () { try { view.contentWindow.history.forward(); } catch (e) {} });
-  $('reloadBtn').addEventListener('click', function () { setLoading(true); try { view.contentWindow.location.reload(); } catch (e) {} });
+  // The page lives in an opaque-origin sandbox, so the shell can only talk to it by message.
+  function cmd(c) { try { view.contentWindow.postMessage({ type: 'proxy-cmd', cmd: c }, '*'); } catch (e) {} }
+  $('backBtn').addEventListener('click', function () { cmd('back'); });
+  $('fwdBtn').addEventListener('click', function () { cmd('forward'); });
+  $('reloadBtn').addEventListener('click', function () { setLoading(true); cmd('reload'); });
   document.querySelectorAll('[data-go]').forEach(function (b) {
     b.addEventListener('click', function () { open(b.getAttribute('data-go')); });
   });
@@ -92,7 +94,7 @@
 
   // The injected script reports the real address of the page being shown.
   window.addEventListener('message', function (e) {
-    if (e.origin !== location.origin || e.source !== view.contentWindow) return;
+    if (e.source !== view.contentWindow) return; // sandboxed frames have origin "null"
     var d = e.data;
     if (!d || d.type !== 'proxy-nav' || typeof d.url !== 'string' || !/^https?:\/\//i.test(d.url)) return;
     addr.value = d.url;

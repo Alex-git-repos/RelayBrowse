@@ -95,7 +95,7 @@ iframe{flex:1;width:100%;border:0;background:#fff}
     <form class="addr" id="addrForm"><input id="addr" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Address"></form>
     <div class="progress" id="progress" aria-hidden="true"></div>
   </div>
-  <iframe id="view" title="Proxied page" referrerpolicy="no-referrer"></iframe>
+  <iframe id="view" title="Proxied page" referrerpolicy="no-referrer" sandbox="allow-scripts allow-forms" allow="camera 'none'; microphone 'none'; geolocation 'none'; clipboard-read 'none'; clipboard-write 'none'; display-capture 'none'; payment 'none'"></iframe>
 </div>
 
 <script src="/app.js"></script>

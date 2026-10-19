@@ -7,6 +7,7 @@
   'use strict';
   var BASE = window.__PROXY_BASE__;
   if (!BASE) return;
+  var TOKEN = window.__PROXY_TOKEN__ || '';
 
   var SKIP = /^\s*(#|javascript:|data:|blob:|mailto:|tel:|about:)/i;
 
@@ -20,7 +21,7 @@
     if (u == null) return u;
     var s = String(u);
     if (SKIP.test(s) || s.indexOf('/proxy?') === 0) return s;
-    try { return '/proxy?url=' + enc(new URL(s, BASE).href); } catch (e) { return s; }
+    try { return '/proxy?url=' + enc(new URL(s, BASE).href) + '&t=' + TOKEN; } catch (e) { return s; }
   }
 
   // fetch
@@ -31,7 +32,7 @@
         input = prox(input);
       } else if (input && typeof Request !== 'undefined' && input instanceof Request) {
         var u = new URL(input.url);
-        if (u.origin === location.origin && u.pathname !== '/proxy') input = new Request(prox(u.pathname + u.search), input);
+        if (u.origin === new URL(document.baseURI).origin && u.pathname !== '/proxy') input = new Request(prox(u.pathname + u.search), input);
       }
       return nativeFetch.call(this, input, init);
     };
@@ -46,12 +47,26 @@
   };
 
   // window.open
-  var nativeWindowOpen = window.open;
+  // Popups would escape the sandbox, so "open" navigates this frame instead.
   window.open = function (url) {
-    var args = Array.prototype.slice.call(arguments);
-    if (url) args[0] = prox(url);
-    return nativeWindowOpen.apply(window, args);
+    if (url) { try { location.assign(prox(url)); } catch (e) {} }
+    return null;
   };
+
+  // Close side channels that bypass the proxy.
+  ['RTCPeerConnection', 'webkitRTCPeerConnection', 'RTCDataChannel', 'WebTransport'].forEach(function (n) {
+    try { Object.defineProperty(window, n, { value: undefined, configurable: false, writable: false }); } catch (e) {}
+  });
+  window.WebSocket = function () { throw new DOMException('WebSockets are disabled', 'SecurityError'); };
+  if (window.EventSource) {
+    var NativeES = window.EventSource;
+    window.EventSource = function (u, o) { return new NativeES(prox(u), o); };
+  }
+  if (navigator.sendBeacon) {
+    var nativeBeacon = navigator.sendBeacon;
+    navigator.sendBeacon = function (u, d) { return nativeBeacon.call(navigator, prox(u), d); };
+  }
+  if (navigator.serviceWorker) { try { Object.defineProperty(navigator, 'serviceWorker', { value: undefined }); } catch (e) {} }
 
   // history: keep the real URL out of the address bar of our own origin
   ['pushState', 'replaceState'].forEach(function (name) {
@@ -91,11 +106,19 @@
   // Tell the shell which real URL is showing, so its address bar stays accurate.
   function report() {
     try {
-      window.parent.postMessage({ type: 'proxy-nav', url: BASE, title: document.title }, location.origin);
+      window.parent.postMessage({ type: 'proxy-nav', url: BASE, title: document.title }, '*'); // our frame has origin "null"
     } catch (e) { /* not framed */ }
   }
   if (window.parent !== window) {
     window.addEventListener('load', report);
     document.addEventListener('DOMContentLoaded', report);
   }
+
+  // Back / forward / reload requests from the shell.
+  window.addEventListener('message', function (e) {
+    if (e.source !== window.parent || !e.data || e.data.type !== 'proxy-cmd') return;
+    if (e.data.cmd === 'back') history.back();
+    else if (e.data.cmd === 'forward') history.forward();
+    else if (e.data.cmd === 'reload') location.reload();
+  });
 })();

@@ -34,6 +34,7 @@ Set these as environment variables.
 
 ## Security built in
 
+- **Sandboxed pages.** Every proxied page runs in an opaque-origin sandbox (CSP `sandbox`, no top navigation, popups, downloads or modals), may only load from this server (`default-src`/`connect-src`/`frame-src` `self`), has no cookies or storage shared with the shell or other sites, and gets a fixed user agent and language. WebSockets, WebRTC, service workers and beacons are routed or disabled, and camera, mic, location and similar APIs are denied.
 - **Private network blocking.** The proxy refuses loopback, private, link-local (including cloud metadata at 169.254.169.254) and multicast addresses, for both IP literals and hostnames. The check runs at connection time, which also stops DNS rebinding.
 - Only `http` and `https`, and only ports 80, 443, 8080 and 8443.
 - Size limits (25 MB per response, 8 MB for pages it rewrites, 1 MB for form posts) and a 25 second timeout.

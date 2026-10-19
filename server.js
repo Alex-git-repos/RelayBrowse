@@ -99,7 +99,10 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&
 
 // encodeURIComponent leaves ! ' ( ) * alone, which breaks url('...') in CSS.
 const enc = (s) => encodeURIComponent(s).replace(/[!'()*]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase());
-const prox = (absUrl) => '/proxy?url=' + enc(absUrl);
+// Pages run in a sandbox with no cookies, so each proxied URL carries a
+// capability token (derived from AUTH_TOKEN, useless for anything else).
+const FRAME_TOKEN = crypto.createHmac('sha256', AUTH_TOKEN).update('relay-frame-v1').digest('hex');
+const prox = (absUrl) => '/proxy?url=' + enc(absUrl) + '&t=' + FRAME_TOKEN;
 
 const SKIP = /^\s*(#|javascript:|data:|mailto:|tel:|blob:|about:)/i;
 
@@ -221,12 +224,17 @@ function rewriteHtml(html, pageUrl) {
       // A GET form replaces the action's query string with its fields, so we
       // pass the real target in a hidden field and rebuild it server-side.
       $f.attr('action', '/proxy');
-      $f.prepend(`<input type="hidden" name="__pa" value="${esc(abs)}">`);
+      $f.prepend(`<input type="hidden" name="t" value="${FRAME_TOKEN}"><input type="hidden" name="__pa" value="${esc(abs)}">`);
     }
   });
 
   // Keep navigation inside the proxy's frame.
-  $('[target="_top"], [target="_parent"]').attr('target', '_self');
+  $('[target]').attr('target', '_self');
+  $('[ping]').removeAttr('ping');
+  $('[formaction]').each((_, el) => {
+    const abs = resolveUrl($(el).attr('formaction'), base);
+    if (abs) $(el).attr('formaction', prox(abs)); else $(el).removeAttr('formaction');
+  });
 
   $('meta[http-equiv]').each((_, el) => {
     if (!/^refresh$/i.test($(el).attr('http-equiv'))) return;
@@ -241,7 +249,7 @@ function rewriteHtml(html, pageUrl) {
 
   // Patch fetch/XHR/history in the page before any of its own scripts run.
   const baseJson = JSON.stringify(base).replace(/</g, '\\u003c');
-  $('head').prepend(`<script>window.__PROXY_BASE__=${baseJson};</script><script src="/inject.js"></script>`);
+  $('head').prepend(`<script>window.__PROXY_BASE__=${baseJson};window.__PROXY_TOKEN__="${FRAME_TOKEN}";</script><script src="/inject.js"></script>`);
 
   return $.html();
 }
@@ -252,7 +260,23 @@ function rewriteHtml(html, pageUrl) {
 
 const FORWARD_RESPONSE_HEADERS = ['content-type', 'cache-control', 'last-modified', 'etag', 'content-language', 'content-disposition'];
 
+// Every proxied response is locked into a sandbox: opaque origin (no access to
+// the proxy UI, its storage or other sites), no top navigation, no popups,
+// no downloads/modals, and the browser may only load from this server.
+const ISOLATION_HEADERS = {
+  'Content-Security-Policy': "sandbox allow-scripts allow-forms; default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-src 'self'; form-action 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'self'",
+  'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), display-capture=(), usb=(), serial=(), hid=(), bluetooth=(), payment=(), clipboard-read=(), clipboard-write=(), publickey-credentials-get=(), midi=(), accelerometer=(), gyroscope=(), magnetometer=(), idle-detection=(), screen-wake-lock=()',
+  'Cross-Origin-Resource-Policy': 'cross-origin',
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, HEAD, POST, OPTIONS',
+  'Access-Control-Allow-Headers': '*',
+  'Referrer-Policy': 'no-referrer',
+  'X-Content-Type-Options': 'nosniff',
+};
+
 async function handleProxy(req, res, reqUrl) {
+  for (const [k, v] of Object.entries(ISOLATION_HEADERS)) res.setHeader(k, v);
+  if (req.method === 'OPTIONS') { res.writeHead(204, { 'Access-Control-Max-Age': '600' }); return res.end(); }
   if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'POST') {
     return errorPage(res, 405, 'Method not allowed', 'This proxy supports GET and POST requests.');
   }
@@ -262,6 +286,7 @@ async function handleProxy(req, res, reqUrl) {
   if (formTarget) {
     // Rebuild a GET form submission: real action URL + the form's fields.
     reqUrl.searchParams.delete('__pa');
+    reqUrl.searchParams.delete('t');
     let t;
     try { t = new URL(formTarget); } catch { return errorPage(res, 400, 'Invalid address', 'The form target is not a valid URL.'); }
     t.search = '';
@@ -281,9 +306,10 @@ async function handleProxy(req, res, reqUrl) {
   if (req.method === 'POST') body = await readBody(req, MAX_REQUEST_BODY);
 
   const headers = {
-    'user-agent': req.headers['user-agent'] || 'Mozilla/5.0',
+    // Fixed identity: nothing about the user's browser is passed to sites.
+    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
     accept: req.headers.accept || '*/*',
-    'accept-language': req.headers['accept-language'] || 'en-US,en;q=0.9',
+    'accept-language': 'en-US,en;q=0.9',
     'accept-encoding': 'identity',
   };
   if (body && req.headers['content-type']) headers['content-type'] = req.headers['content-type'];
@@ -369,7 +395,7 @@ const STATIC = {
   '/inject.js': ['inject.js', 'text/javascript; charset=utf-8'],
 };
 
-const UI_CSP = "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; frame-src 'self'; base-uri 'none'; form-action 'self'";
+const UI_CSP = "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; frame-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self'";
 
 function serveStatic(pathname, res) {
   const entry = STATIC[pathname];
@@ -377,7 +403,14 @@ function serveStatic(pathname, res) {
   fs.readFile(path.join(PUBLIC_DIR, entry[0]), (err, data) => {
     if (err) return errorPage(res, 500, 'Server error', 'Couldn\u2019t read the file.');
     const headers = { 'Content-Type': entry[1], 'Cache-Control': 'no-cache' };
-    if (entry[0] === 'index.html') headers['Content-Security-Policy'] = UI_CSP;
+    if (entry[0] === 'index.html') {
+      headers['Content-Security-Policy'] = UI_CSP;
+      headers['X-Frame-Options'] = 'DENY';
+      headers['X-Content-Type-Options'] = 'nosniff';
+      headers['Referrer-Policy'] = 'no-referrer';
+      headers['Cross-Origin-Opener-Policy'] = 'same-origin';
+    }
+    if (entry[0] === 'inject.js') headers['Access-Control-Allow-Origin'] = '*';
     res.writeHead(200, headers);
     res.end(data);
   });
@@ -437,7 +470,11 @@ const server = http.createServer(async (req, res) => {
       });
       return res.end();
     }
-    if (!authorised(req)) return defaultPage(res);
+    // inject.js holds no secrets; sandboxed pages can't send the auth cookie.
+    if (url.pathname === '/inject.js') return serveStatic(url.pathname, res);
+    // Sandboxed pages authenticate /proxy with the frame token instead of the cookie.
+    const frameOk = url.pathname === '/proxy' && safeEqual(url.searchParams.get('t') || '', FRAME_TOKEN);
+    if (!frameOk && !authorised(req)) return defaultPage(res);
     if (url.pathname === '/proxy') return await handleProxy(req, res, url);
     return serveStatic(url.pathname, res);
   } catch (err) {
