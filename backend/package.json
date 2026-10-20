@@ -1,0 +1,17 @@
+{
+  "name": "relay-browse-backend",
+  "version": "3.0.0",
+  "description": "Relay Browse backend: a web proxy with URL rewriting (API only)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "dependencies": {
+    "cheerio": "^1.0.0",
+    "undici": "^6.19.0"
+  },
+  "license": "MIT"
+}

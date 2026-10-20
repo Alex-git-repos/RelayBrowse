@@ -1,19 +1,26 @@
 'use strict';
 
 /**
- * Relay web proxy: backend.
+ * Relay Browse: backend (API only, no UI).
  *
- *   GET  /                 the browser-style frontend
- *   GET  /proxy?url=...    fetch a page and rewrite it so links, images,
+ *   POST /api/auth         { token } -> { frameToken }   (exchange the access key)
+ *   GET  /proxy?url=&t=    fetch a page and rewrite it so links, images,
  *                          styles, scripts and forms keep going through us
- *   POST /proxy?url=...    forwards form posts
+ *   POST /proxy?url=&t=    forwards form posts
+ *   GET  /inject.js        client-side patch loaded into every proxied page
+ *   GET  /health           liveness check
  *
- * Environment variables (all optional):
+ * The frontend lives on a different origin, so there are no cookies: it
+ * trades the access key for a frame token and puts that token on /proxy URLs.
+ *
+ * Environment variables:
+ *   AUTH_TOKEN       REQUIRED in production: the secret access key
+ *   FRONTEND_ORIGIN  origin of the frontend, e.g. https://relaybrowse.example.com
+ *                    (used for CORS and frame-ancestors; "*" if unset)
  *   PORT             port to listen on                     (default 3000)
- *   HOST             interface to bind                     (default 127.0.0.1)
- *   AUTH_TOKEN       secret token; visiting /<token> sets the auth cookie
+ *   HOST             interface to bind                     (default 0.0.0.0)
  *   RATE_LIMIT       max requests per IP per minute        (default 600)
- *   TRUST_PROXY      "1" to read client IP from X-Forwarded-For
+ *   TRUST_PROXY      "1" to read client IP from X-Forwarded-For (set on Render)
  *   ALLOW_PRIVATE    "1" to allow private/loopback targets (testing only!)
  */
 
@@ -28,8 +35,11 @@ const { fetch, Agent } = require('undici');
 const cheerio = require('cheerio');
 
 const PORT = Number(process.env.PORT) || 3000;
-const HOST = process.env.HOST || '127.0.0.1';
-const AUTH_TOKEN = process.env.AUTH_TOKEN || '3c94e25a79b587b24a0cd93294d6ff63dc8c9b100dcb769a2decee0450dc7bda';
+const HOST = process.env.HOST || '0.0.0.0';
+const GENERATED_TOKEN = !process.env.AUTH_TOKEN;
+// No hard-coded fallback secret: without AUTH_TOKEN a random one is used for this run.
+const AUTH_TOKEN = process.env.AUTH_TOKEN || crypto.randomBytes(32).toString('hex');
+const FRONTEND_ORIGIN = (process.env.FRONTEND_ORIGIN || '').replace(/\/+$/, '');
 const RATE_LIMIT = Number(process.env.RATE_LIMIT) || 600;
 const TRUST_PROXY = process.env.TRUST_PROXY === '1';
 const ALLOW_PRIVATE = process.env.ALLOW_PRIVATE === '1';
@@ -264,7 +274,7 @@ const FORWARD_RESPONSE_HEADERS = ['content-type', 'cache-control', 'last-modifie
 // the proxy UI, its storage or other sites), no top navigation, no popups,
 // no downloads/modals, and the browser may only load from this server.
 const ISOLATION_HEADERS = {
-  'Content-Security-Policy': "sandbox allow-scripts allow-forms; default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-src 'self'; form-action 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'self'",
+  'Content-Security-Policy': `sandbox allow-scripts allow-forms; default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-src 'self'; form-action 'self'; base-uri 'none'; object-src 'none'; frame-ancestors ${FRONTEND_ORIGIN || '*'}`,
   'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), display-capture=(), usb=(), serial=(), hid=(), bluetooth=(), payment=(), clipboard-read=(), clipboard-write=(), publickey-credentials-get=(), midi=(), accelerometer=(), gyroscope=(), magnetometer=(), idle-detection=(), screen-wake-lock=()',
   'Cross-Origin-Resource-Policy': 'cross-origin',
   'Access-Control-Allow-Origin': '*',
@@ -387,53 +397,22 @@ async function handleProxy(req, res, reqUrl) {
 /* Static files, auth, rate limiting                                    */
 /* ------------------------------------------------------------------ */
 
-const PUBLIC_DIR = path.join(__dirname, 'public');
-const STATIC = {
-  '/': ['index.html', 'text/html; charset=utf-8'],
-  '/index.html': ['index.html', 'text/html; charset=utf-8'],
-  '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
-  '/inject.js': ['inject.js', 'text/javascript; charset=utf-8'],
-};
-
-const UI_CSP = "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; frame-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self'";
-
-function serveStatic(pathname, res) {
-  const entry = STATIC[pathname];
-  if (!entry) return errorPage(res, 404, 'Not found', 'There is nothing at this address.');
-  fs.readFile(path.join(PUBLIC_DIR, entry[0]), (err, data) => {
+function serveInject(res) {
+  fs.readFile(path.join(__dirname, 'inject.js'), (err, data) => {
     if (err) return errorPage(res, 500, 'Server error', 'Couldn\u2019t read the file.');
-    const headers = { 'Content-Type': entry[1], 'Cache-Control': 'no-cache' };
-    if (entry[0] === 'index.html') {
-      headers['Content-Security-Policy'] = UI_CSP;
-      headers['X-Frame-Options'] = 'DENY';
-      headers['X-Content-Type-Options'] = 'nosniff';
-      headers['Referrer-Policy'] = 'no-referrer';
-      headers['Cross-Origin-Opener-Policy'] = 'same-origin';
-    }
-    if (entry[0] === 'inject.js') headers['Access-Control-Allow-Origin'] = '*';
-    res.writeHead(200, headers);
+    res.writeHead(200, {
+      'Content-Type': 'text/javascript; charset=utf-8',
+      'Cache-Control': 'no-cache',
+      'Access-Control-Allow-Origin': '*',
+      'Cross-Origin-Resource-Policy': 'cross-origin',
+      'X-Content-Type-Options': 'nosniff',
+    });
     res.end(data);
   });
 }
 
 const sha = (v) => crypto.createHash('sha256').update(String(v)).digest();
 const safeEqual = (a, b) => crypto.timingSafeEqual(sha(a), sha(b));
-
-function getCookie(req, name) {
-  for (const part of (req.headers.cookie || '').split(';')) {
-    const i = part.indexOf('=');
-    if (i > 0 && part.slice(0, i).trim() === name) return part.slice(i + 1).trim();
-  }
-  return '';
-}
-
-function authorised(req) {
-  return safeEqual(getCookie(req, 'auth'), AUTH_TOKEN);
-}
-
-function isSecure(req) {
-  return Boolean(req.socket.encrypted) || (TRUST_PROXY && /^https/i.test(req.headers['x-forwarded-proto'] || ''));
-}
 
 /** Plain decoy page shown to anyone without the auth cookie. */
 function defaultPage(res) {
@@ -453,6 +432,37 @@ function rateLimited(ip) {
   return ++h.count > RATE_LIMIT;
 }
 
+const authHits = new Map();
+setInterval(() => { const now = Date.now(); for (const [k, v] of authHits) if (v.reset < now) authHits.delete(k); }, 60_000).unref();
+function authRateLimited(ip) {
+  const now = Date.now();
+  let h = authHits.get(ip);
+  if (!h || h.reset < now) { h = { count: 0, reset: now + 60_000 }; authHits.set(ip, h); }
+  return ++h.count > 10; // access-key guesses per IP per minute
+}
+
+function json(res, status, obj, extra) {
+  res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...extra });
+  res.end(JSON.stringify(obj));
+}
+
+async function handleAuth(req, res, ip) {
+  const cors = {
+    'Access-Control-Allow-Origin': FRONTEND_ORIGIN || '*',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Vary': 'Origin',
+  };
+  if (req.method === 'OPTIONS') { res.writeHead(204, { ...cors, 'Access-Control-Max-Age': '600' }); return res.end(); }
+  if (req.method !== 'POST') return json(res, 405, { error: 'Method not allowed' }, cors);
+  if (authRateLimited(ip)) return json(res, 429, { error: 'Too many attempts. Try again in a minute.' }, { ...cors, 'Retry-After': '60' });
+  let token = '';
+  try { token = String(JSON.parse((await readBody(req, 4096)).toString('utf8')).token || ''); }
+  catch { return json(res, 400, { error: 'Bad request' }, cors); }
+  if (!safeEqual(token, AUTH_TOKEN)) return json(res, 401, { error: 'Wrong access key.' }, cors);
+  return json(res, 200, { frameToken: FRAME_TOKEN }, cors);
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     const ip = (TRUST_PROXY && (req.headers['x-forwarded-for'] || '').split(',')[0].trim()) || req.socket.remoteAddress || 'unknown';
@@ -462,21 +472,15 @@ const server = http.createServer(async (req, res) => {
     }
     const url = new URL(req.url, 'http://localhost');
     if (url.pathname === '/health') { res.writeHead(200, { 'Content-Type': 'text/plain' }); return res.end('ok'); }
-    if (url.pathname === '/' + AUTH_TOKEN) {
-      res.writeHead(302, {
-        'Set-Cookie': `auth=${AUTH_TOKEN}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax${isSecure(req) ? '; Secure' : ''}`,
-        Location: '/',
-        'Cache-Control': 'no-store',
-      });
-      return res.end();
+    // inject.js holds no secrets; sandboxed pages can't send credentials anyway.
+    if (url.pathname === '/inject.js') return serveInject(res);
+    if (url.pathname === '/api/auth') return await handleAuth(req, res, ip);
+    // /proxy is authenticated by the frame token the frontend got from /api/auth.
+    if (url.pathname === '/proxy') {
+      if (!safeEqual(url.searchParams.get('t') || '', FRAME_TOKEN)) return defaultPage(res);
+      return await handleProxy(req, res, url);
     }
-    // inject.js holds no secrets; sandboxed pages can't send the auth cookie.
-    if (url.pathname === '/inject.js') return serveStatic(url.pathname, res);
-    // Sandboxed pages authenticate /proxy with the frame token instead of the cookie.
-    const frameOk = url.pathname === '/proxy' && safeEqual(url.searchParams.get('t') || '', FRAME_TOKEN);
-    if (!frameOk && !authorised(req)) return defaultPage(res);
-    if (url.pathname === '/proxy') return await handleProxy(req, res, url);
-    return serveStatic(url.pathname, res);
+    return defaultPage(res);
   } catch (err) {
     if (!res.headersSent) errorPage(res, err.status || 500, 'Something went wrong', err.message || 'Unexpected error.');
     else res.destroy();
@@ -484,7 +488,8 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`Relay web proxy running at http://${HOST}:${PORT}`);
+  console.log(`Relay Browse backend listening on http://${HOST}:${PORT}`);
   if (ALLOW_PRIVATE) console.warn('WARNING: ALLOW_PRIVATE=1, private network targets are reachable. Use for testing only.');
-  if (!process.env.AUTH_TOKEN) console.warn('WARNING: using the built-in default AUTH_TOKEN. Set AUTH_TOKEN in the environment.');
+  if (GENERATED_TOKEN) console.warn(`WARNING: AUTH_TOKEN is not set. Using a random key for this run only: ${AUTH_TOKEN}`);
+  if (!FRONTEND_ORIGIN) console.warn('WARNING: FRONTEND_ORIGIN is not set; CORS and framing are open to any site.');
 });
