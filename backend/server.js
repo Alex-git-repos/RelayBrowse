@@ -8,6 +8,7 @@
  *                          styles, scripts and forms keep going through us
  *   POST /proxy?url=&t=    forwards form posts
  *   GET  /inject.js        client-side patch loaded into every proxied page
+ *   GET  /api/session?t=   200 if the saved frame token is still valid, else 401
  *   GET  /health           liveness check
  *
  * The frontend lives on a different origin, so there are no cookies: it
@@ -54,21 +55,46 @@ const ALLOWED_PORTS = new Set([80, 443, 8080, 8443]);
 /* SSRF protection: never let the proxy reach internal networks        */
 /* ------------------------------------------------------------------ */
 
-const blocked = new net.BlockList();
-[
+const V4_BLOCKED = [
   ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8],
-  ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.168.0.0', 16],
-  ['198.18.0.0', 15], ['224.0.0.0', 4], ['240.0.0.0', 4],
-].forEach(([addr, prefix]) => blocked.addSubnet(addr, prefix, 'ipv4'));
-[['::', 128], ['::1', 128], ['fc00::', 7], ['fe80::', 10], ['ff00::', 8]]
+  ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.0.2.0', 24],
+  ['192.168.0.0', 16], ['198.18.0.0', 15], ['198.51.100.0', 24], ['203.0.113.0', 24],
+  ['224.0.0.0', 4], ['240.0.0.0', 4],
+];
+const blocked = new net.BlockList();
+for (const [addr, prefix] of V4_BLOCKED) {
+  blocked.addSubnet(addr, prefix, 'ipv4');
+  // The same private ranges can hide inside IPv6 transition addresses (NAT64
+  // 64:ff9b::/96 and 6to4 2002::/16). Block only those that wrap a private
+  // IPv4 address, so public sites on IPv6-only networks keep working.
+  const o = addr.split('.').map(Number);
+  const hi = ((o[0] << 8) | o[1]).toString(16);
+  const lo = ((o[2] << 8) | o[3]).toString(16);
+  blocked.addSubnet(`64:ff9b::${hi}:${lo}`, 96 + prefix, 'ipv6');
+  blocked.addSubnet(`2002:${hi}:${lo}::`, 16 + prefix, 'ipv6');
+}
+// ::/96 covers "::", "::1" and the old IPv4-compatible form; the rest are
+// unique-local, link-local, site-local, multicast, discard, Teredo and docs ranges.
+[['::', 96], ['fc00::', 7], ['fe80::', 10], ['fec0::', 10], ['ff00::', 8], ['100::', 64], ['2001::', 32], ['2001:db8::', 32]]
   .forEach(([addr, prefix]) => blocked.addSubnet(addr, prefix, 'ipv6'));
 
+/** "::ffff:7f00:1" and "::ffff:127.0.0.1" are both just 127.0.0.1; unwrap them. */
+function unmap(ip) {
+  let m = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(ip);
+  if (m) return m[1];
+  m = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(ip); // the form URL() normalises to
+  if (m) {
+    const hi = parseInt(m[1], 16), lo = parseInt(m[2], 16);
+    return [hi >> 8, hi & 255, lo >> 8, lo & 255].join('.');
+  }
+  return ip;
+}
+
 function isBlockedAddress(ip) {
-  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(ip); // IPv4-mapped IPv6
-  if (mapped) ip = mapped[1];
+  ip = unmap(String(ip).replace(/%.*$/, '')); // drop any IPv6 zone id
   const family = net.isIP(ip);
-  if (!family) return true;
-  return blocked.check(ip, family === 4 ? 'ipv4' : 'ipv6');
+  if (!family) return true; // anything we can't parse is refused
+  try { return blocked.check(ip, family === 4 ? 'ipv4' : 'ipv6'); } catch { return true; }
 }
 
 /**
@@ -88,16 +114,26 @@ function safeLookup(hostname, options, callback) {
 
 const agent = new Agent({ connect: { lookup: safeLookup }, headersTimeout: UPSTREAM_TIMEOUT_MS });
 
+// Names that only ever exist on a private network. Public sites always have a
+// dot in their name, so single-label hosts ("router", "redis") are refused too.
+const INTERNAL_NAME = /(^|\.)(localhost|local|internal|localdomain|home\.arpa|svc)$/;
+
 /** Returns an error string if the target must not be fetched, else null. */
-function checkTarget(url) {
+function checkTarget(url, selfHost) {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return 'Only http and https addresses are supported.';
   if (ALLOW_PRIVATE) return null;
   const port = Number(url.port) || (url.protocol === 'https:' ? 443 : 80);
   if (!ALLOWED_PORTS.has(port)) return `Port ${port} is not allowed.`;
-  // IP literals skip DNS, so check them here. URL() has already normalised
-  // odd forms like 0x7f.1 or 2130706433 into dotted notation.
-  const host = url.hostname.replace(/^\[|\]$/g, '');
-  if (net.isIP(host) && isBlockedAddress(host)) return 'That address is on a private network.';
+  const host = url.hostname.replace(/^\[|\]$/g, '').replace(/\.$/, '').toLowerCase();
+  if (net.isIP(host)) {
+    // IP literals skip DNS, so check them here. URL() has already normalised
+    // odd forms like 0x7f.1 or 2130706433 into dotted notation.
+    if (isBlockedAddress(host)) return 'That address is on a private network.';
+  } else {
+    if (!host.includes('.') || INTERNAL_NAME.test(host)) return 'That address is on a private network.';
+    // Fetching ourselves would loop back into the proxy (and its login endpoint).
+    if (selfHost && host === selfHost) return 'The server can’t open itself.';
+  }
   return null;
 }
 
@@ -186,7 +222,7 @@ function rewriteCss(css, base) {
 }
 
 const URL_ATTRS = [
-  ['a', 'href'], ['area', 'href'], ['link', 'href'],
+  ['a', 'href'], ['area', 'href'], ['link', 'href'], ['image', 'href'], ['image', 'xlink:href'],
   ['script', 'src'], ['img', 'src'], ['source', 'src'], ['video', 'src'],
   ['video', 'poster'], ['audio', 'src'], ['track', 'src'], ['iframe', 'src'],
   ['frame', 'src'], ['embed', 'src'], ['input', 'src'], ['object', 'data'],
@@ -233,8 +269,10 @@ function rewriteHtml(html, pageUrl) {
     } else {
       // A GET form replaces the action's query string with its fields, so we
       // pass the real target in a hidden field and rebuild it server-side.
+      // The token uses its own field name (__pt) so a site's own field called
+      // "t" is no longer swallowed.
       $f.attr('action', '/proxy');
-      $f.prepend(`<input type="hidden" name="t" value="${FRAME_TOKEN}"><input type="hidden" name="__pa" value="${esc(abs)}">`);
+      $f.prepend(`<input type="hidden" name="__pt" value="${FRAME_TOKEN}"><input type="hidden" name="__pa" value="${esc(abs)}">`);
     }
   });
 
@@ -259,7 +297,11 @@ function rewriteHtml(html, pageUrl) {
 
   // Patch fetch/XHR/history in the page before any of its own scripts run.
   const baseJson = JSON.stringify(base).replace(/</g, '\\u003c');
-  $('head').prepend(`<script>window.__PROXY_BASE__=${baseJson};window.__PROXY_TOKEN__="${FRAME_TOKEN}";</script><script src="/inject.js"></script>`);
+  const parentJson = JSON.stringify(FRONTEND_ORIGIN || '*').replace(/</g, '\\u003c');
+  // __PROXY_BASE__ is where relative URLs resolve (a <base href> can move it); __PROXY_URL__
+  // is the page's own address, which is what the shell's address bar should show.
+  const pageJson = JSON.stringify(pageUrl).replace(/</g, '\\u003c');
+  $('head').prepend(`<script>window.__PROXY_BASE__=${baseJson};window.__PROXY_URL__=${pageJson};window.__PROXY_TOKEN__="${FRAME_TOKEN}";window.__PROXY_PARENT__=${parentJson};</script><script src="/inject.js"></script>`);
 
   return $.html();
 }
@@ -295,8 +337,9 @@ async function handleProxy(req, res, reqUrl) {
   const formTarget = reqUrl.searchParams.get('__pa');
   if (formTarget) {
     // Rebuild a GET form submission: real action URL + the form's fields.
+    // Only our own two fields are removed; a site field named "t" is kept.
     reqUrl.searchParams.delete('__pa');
-    reqUrl.searchParams.delete('t');
+    reqUrl.searchParams.delete('__pt');
     let t;
     try { t = new URL(formTarget); } catch { return errorPage(res, 400, 'Invalid address', 'The form target is not a valid URL.'); }
     t.search = '';
@@ -307,7 +350,8 @@ async function handleProxy(req, res, reqUrl) {
 
   let target;
   try { target = new URL(targetStr); } catch { return errorPage(res, 400, 'Invalid address', 'That doesn\u2019t look like a valid URL.'); }
-  const problem = checkTarget(target);
+  const selfHost = (req.headers.host || '').toLowerCase().replace(/:\d+$/, '');
+  const problem = checkTarget(target, selfHost);
   if (problem) return errorPage(res, 403, 'Address not allowed', problem);
   target.username = '';
   target.password = '';
@@ -323,6 +367,7 @@ async function handleProxy(req, res, reqUrl) {
     'accept-encoding': 'identity',
   };
   if (body && req.headers['content-type']) headers['content-type'] = req.headers['content-type'];
+  if (req.headers.range) headers.range = req.headers.range; // lets audio/video seek
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
@@ -373,6 +418,17 @@ async function handleProxy(req, res, reqUrl) {
       res.writeHead(upstream.status, out);
       return res.end(rewritten);
     }
+
+    // Untouched files (media, images, downloads) keep their range/length info.
+    // content-length is only safe when the body wasn't compressed upstream,
+    // because fetch() hands us the decoded bytes.
+    for (const h of ['content-range', 'accept-ranges']) {
+      const v = upstream.headers.get(h);
+      if (v) out[h] = v;
+    }
+    const encoding = upstream.headers.get('content-encoding') || '';
+    const length = upstream.headers.get('content-length');
+    if (length && (!encoding || /^identity$/i.test(encoding))) out['content-length'] = length;
 
     res.writeHead(upstream.status, out);
     if (!upstream.body || req.method === 'HEAD') return res.end();
@@ -446,13 +502,24 @@ function json(res, status, obj, extra) {
   res.end(JSON.stringify(obj));
 }
 
+const apiCors = (methods) => ({
+  'Access-Control-Allow-Origin': FRONTEND_ORIGIN || '*',
+  'Access-Control-Allow-Methods': methods,
+  'Access-Control-Allow-Headers': 'Content-Type',
+  'Vary': 'Origin',
+});
+
+/** Lets the frontend ask "is my saved token still good?" without loading a page. */
+function handleSession(req, res, url) {
+  const cors = apiCors('GET, OPTIONS');
+  if (req.method === 'OPTIONS') { res.writeHead(204, { ...cors, 'Access-Control-Max-Age': '600' }); return res.end(); }
+  if (req.method !== 'GET') return json(res, 405, { error: 'Method not allowed' }, cors);
+  if (!safeEqual(url.searchParams.get('t') || '', FRAME_TOKEN)) return json(res, 401, { error: 'Session expired.' }, cors);
+  return json(res, 200, { ok: true }, cors);
+}
+
 async function handleAuth(req, res, ip) {
-  const cors = {
-    'Access-Control-Allow-Origin': FRONTEND_ORIGIN || '*',
-    'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
-    'Vary': 'Origin',
-  };
+  const cors = apiCors('POST, OPTIONS');
   if (req.method === 'OPTIONS') { res.writeHead(204, { ...cors, 'Access-Control-Max-Age': '600' }); return res.end(); }
   if (req.method !== 'POST') return json(res, 405, { error: 'Method not allowed' }, cors);
   if (authRateLimited(ip)) return json(res, 429, { error: 'Too many attempts. Try again in a minute.' }, { ...cors, 'Retry-After': '60' });
@@ -470,14 +537,19 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(429, { 'Retry-After': '60', 'Content-Type': 'text/plain' });
       return res.end('Too many requests. Try again in a minute.');
     }
+    // Every response, on every path, tells crawlers to keep out of the index.
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive, nosnippet');
     const url = new URL(req.url, 'http://localhost');
     if (url.pathname === '/health') { res.writeHead(200, { 'Content-Type': 'text/plain' }); return res.end('ok'); }
     // inject.js holds no secrets; sandboxed pages can't send credentials anyway.
     if (url.pathname === '/inject.js') return serveInject(res);
     if (url.pathname === '/api/auth') return await handleAuth(req, res, ip);
+    if (url.pathname === '/api/session') return handleSession(req, res, url);
     // /proxy is authenticated by the frame token the frontend got from /api/auth.
+    // GET forms carry it as __pt (so a site's own "t" field can't collide); links use t.
     if (url.pathname === '/proxy') {
-      if (!safeEqual(url.searchParams.get('t') || '', FRAME_TOKEN)) return defaultPage(res);
+      const given = url.searchParams.get('__pt') || url.searchParams.get('t') || '';
+      if (!safeEqual(given, FRAME_TOKEN)) return defaultPage(res);
       return await handleProxy(req, res, url);
     }
     return defaultPage(res);
@@ -490,6 +562,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   console.log(`Relay Browse backend listening on http://${HOST}:${PORT}`);
   if (ALLOW_PRIVATE) console.warn('WARNING: ALLOW_PRIVATE=1, private network targets are reachable. Use for testing only.');
+  else if (process.env.ALLOW_PRIVATE) console.warn(`Note: ALLOW_PRIVATE="${process.env.ALLOW_PRIVATE}" is ignored. Only the exact value 1 enables it; private targets stay blocked.`);
   if (GENERATED_TOKEN) console.warn(`WARNING: AUTH_TOKEN is not set. Using a random key for this run only: ${AUTH_TOKEN}`);
   if (!FRONTEND_ORIGIN) console.warn('WARNING: FRONTEND_ORIGIN is not set; CORS and framing are open to any site.');
 });

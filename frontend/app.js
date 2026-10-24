@@ -1,37 +1,36 @@
 (function () {
   'use strict';
   var $ = function (id) { return document.getElementById(id); };
-  var home = $('home'), shell = $('shell'), view = $('view'), addr = $('addr');
+  var home = $('home'), locked = $('locked'), shell = $('shell'), view = $('view'), addr = $('addr');
   var hint = $('hint'), progress = $('progress'), recentBox = $('recent');
+  var backBtn = $('backBtn'), fwdBtn = $('fwdBtn');
   var STORE_KEY = 'relay-recent';
-  var TOKEN_KEY = 'relay-frame-token';
-  var BACKEND = String(window.RELAY_BACKEND || '').replace(/\/+$/, '');
-  var gate = $('gate'), gateForm = $('gateForm'), gateKey = $('gateKey'), gateMsg = $('gateMsg');
-  var frameToken = '';
+  var TOKEN_KEY = 'app.t';                 // written by the sign-in page
+  var LEGACY_TOKEN_KEY = 'relay-frame-token';
+  var GATE_KEY = 'app.g';                  // where the sign-in page lives, known only to browsers that have been there
+  var API = String(window.APP_API || window.RELAY_BACKEND || '').replace(/\/+$/, '');
 
-  function loadToken() { try { return localStorage.getItem(TOKEN_KEY) || ''; } catch (e) { return ''; } }
-  function saveToken(t) { try { if (t) localStorage.setItem(TOKEN_KEY, t); else localStorage.removeItem(TOKEN_KEY); } catch (e) {} }
-  frameToken = loadToken();
-
-  function showGate(msg) {
-    home.hidden = true; shell.hidden = true; gate.hidden = false;
-    gateMsg.textContent = msg || '';
-    gateKey.focus();
+  function loadToken() {
+    try {
+      var t = localStorage.getItem(TOKEN_KEY);
+      if (!t) { // one-time migration from the old key name
+        t = localStorage.getItem(LEGACY_TOKEN_KEY);
+        if (t) { localStorage.setItem(TOKEN_KEY, t); localStorage.removeItem(LEGACY_TOKEN_KEY); }
+      }
+      return t || '';
+    } catch (e) { return ''; }
   }
+  function saveToken(t) { try { if (t) localStorage.setItem(TOKEN_KEY, t); else localStorage.removeItem(TOKEN_KEY); } catch (e) {} }
+  var frameToken = loadToken();
 
-  // Trade the access key for a frame token. Cross-origin, so no cookies are involved.
-  function signIn(key) {
-    gateMsg.textContent = 'Connecting\u2026 (the server may take up to a minute to wake up)';
-    return fetch(BACKEND + '/api/auth', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: key }),
-    }).then(function (r) {
-      return r.json().catch(function () { return {}; }).then(function (d) {
-        if (!r.ok || !d.frameToken) throw new Error(d.error || 'Could not sign in.');
-        frameToken = d.frameToken; saveToken(frameToken);
-      });
-    });
+  // Not signed in: hand over to the sign-in page if this browser knows it, otherwise
+  // show a plain "not available" page. Nothing on this page links to the sign-in page.
+  function toGate() {
+    home.hidden = true; shell.hidden = true; locked.hidden = false;
+    view.src = 'about:blank';
+    var path = '';
+    try { path = localStorage.getItem(GATE_KEY) || ''; } catch (e) {}
+    if (/^\/(?!\/)[\w\-./]*$/.test(path)) location.replace(path); // same-site paths only
   }
 
   function normalize(raw) {
@@ -78,17 +77,28 @@
     if (on) { void progress.offsetWidth; progress.classList.add('on'); }
   }
 
-  function open(url) {
-    home.hidden = true;
-    shell.hidden = false;
+  /* Our own history. The page sits in a sandboxed frame that shares session history with
+     this one, so calling history.back() inside it could navigate away from the app. */
+  var stack = [], idx = -1, replaceNext = false;
+
+  function updateNav() {
+    backBtn.disabled = idx <= 0;
+    fwdBtn.disabled = idx >= stack.length - 1;
+  }
+
+  function open(url, fromStack) {
+    locked.hidden = true; home.hidden = true; shell.hidden = false;
     addr.value = url;
     setLoading(true);
-    view.src = BACKEND + '/proxy?url=' + encodeURIComponent(url) + '&t=' + encodeURIComponent(frameToken);
+    if (!fromStack) { stack = stack.slice(0, idx + 1); stack.push(url); idx = stack.length - 1; }
+    replaceNext = true; // the first report after a load may be the post-redirect address
+    view.src = API + '/proxy?url=' + encodeURIComponent(url) + '&t=' + encodeURIComponent(frameToken);
     remember(url);
+    updateNav();
   }
 
   function submit(raw, fromHome) {
-    if (!frameToken) { showGate(); return; }
+    if (!frameToken) { toGate(); return; }
     var url = normalize(raw);
     if (!url) {
       if (fromHome) hint.textContent = 'Enter a web address that starts with http or https, or type a search.';
@@ -103,6 +113,7 @@
     home.hidden = false;
     view.src = 'about:blank';
     addr.value = '';
+    stack = []; idx = -1; updateNav();
     document.title = 'Relay Browse';
     renderRecent();
     $('homeInput').focus();
@@ -110,24 +121,11 @@
 
   $('goForm').addEventListener('submit', function (e) { e.preventDefault(); submit($('homeInput').value, true); });
   $('addrForm').addEventListener('submit', function (e) { e.preventDefault(); submit(addr.value, false); });
-  gateForm.addEventListener('submit', function (e) {
-    e.preventDefault();
-    var key = gateKey.value.trim();
-    if (!key) return;
-    signIn(key).then(function () {
-      gateKey.value = ''; gate.hidden = true; home.hidden = false; gateMsg.textContent = '';
-      $('homeInput').focus();
-    }).catch(function (err) {
-      gateMsg.textContent = err && err.message === 'Failed to fetch' ? 'Couldn\u2019t reach the server. Try again.' : (err.message || 'Could not sign in.');
-    });
-  });
-  $('forgetBtn').addEventListener('click', function () { frameToken = ''; saveToken(''); showGate('Access key forgotten on this device.'); });
+  $('forgetBtn').addEventListener('click', function () { frameToken = ''; saveToken(''); toGate(); });
   $('homeBtn').addEventListener('click', goHome);
-  // The page lives in an opaque-origin sandbox, so the shell can only talk to it by message.
-  function cmd(c) { try { view.contentWindow.postMessage({ type: 'proxy-cmd', cmd: c }, '*'); } catch (e) {} }
-  $('backBtn').addEventListener('click', function () { cmd('back'); });
-  $('fwdBtn').addEventListener('click', function () { cmd('forward'); });
-  $('reloadBtn').addEventListener('click', function () { setLoading(true); cmd('reload'); });
+  backBtn.addEventListener('click', function () { if (idx > 0) { idx--; open(stack[idx], true); } });
+  fwdBtn.addEventListener('click', function () { if (idx < stack.length - 1) { idx++; open(stack[idx], true); } });
+  $('reloadBtn').addEventListener('click', function () { if (idx >= 0) open(stack[idx], true); });
   document.querySelectorAll('[data-go]').forEach(function (b) {
     b.addEventListener('click', function () { open(b.getAttribute('data-go')); });
   });
@@ -139,26 +137,35 @@
     if (e.source !== view.contentWindow) return; // sandboxed frames have origin "null"
     var d = e.data;
     if (!d || d.type !== 'proxy-nav' || typeof d.url !== 'string' || !/^https?:\/\//i.test(d.url)) return;
-    addr.value = d.url;
-    document.title = (d.title || label(d.url)) + ' \u2013 Relay Browse';
+    var url = d.url;
+    if (idx < 0) { stack = [url]; idx = 0; }
+    else if (url !== stack[idx]) {
+      if (replaceNext) stack[idx] = url; // redirected
+      else { stack = stack.slice(0, idx + 1); stack.push(url); idx = stack.length - 1; } // followed a link
+    }
+    replaceNext = false;
+    if (document.activeElement !== addr) addr.value = url; // don't clobber what's being typed
+    var title = typeof d.title === 'string' && d.title ? d.title.slice(0, 120) : label(url);
+    document.title = title + ' – Relay Browse';
+    updateNav();
   });
 
   renderRecent();
+  updateNav();
 
-  // A link like https://your-frontend/#key=SECRET signs in once, then removes the key from the address bar.
-  var hashKey = (/[#&]key=([^&]+)/.exec(location.hash) || [])[1];
-  if (hashKey) {
-    history.replaceState(null, '', location.pathname + location.search);
-    signIn(decodeURIComponent(hashKey)).then(start).catch(function (err) { showGate(err.message); });
+  // Old-style links put the key in the address bar of this page. Never leave it there.
+  if (/[#&]key=/.test(location.hash)) history.replaceState(null, '', location.pathname + location.search);
+
+  if (!frameToken) {
+    toGate();
   } else {
-    start();
-  }
-
-  function start() {
+    locked.hidden = true; home.hidden = false;
     var go = new URLSearchParams(location.search).get('go');
-    if (!frameToken) { showGate(); return; }
-    gate.hidden = true; home.hidden = false;
-    if (go) submit(go, true);
-    else $('homeInput').focus();
+    if (go) submit(go, true); else $('homeInput').focus();
+    // Check the saved sign-in in the background. A network error (the server may be waking
+    // up) is not treated as signed out; only an explicit "no" is.
+    fetch(API + '/api/session?t=' + encodeURIComponent(frameToken), { referrerPolicy: 'no-referrer' })
+      .then(function (r) { if (r.status === 401) { frameToken = ''; saveToken(''); toGate(); } })
+      .catch(function () { /* offline or waking up */ });
   }
 })();

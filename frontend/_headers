@@ -1,0 +1,9 @@
+# Honoured by Netlify and Cloudflare Pages (other hosts: set the same headers in their settings).
+# On hosts that ignore this file it is simply served as plain text, so it must never name the
+# sign-in folder. The sign-in page carries its own robots meta tag instead.
+# There is also deliberately no robots.txt: a "Disallow" line would publish the sign-in path
+# and stop crawlers from ever seeing the noindex rules.
+/*
+  X-Robots-Tag: noindex, nofollow
+  Referrer-Policy: no-referrer
+  X-Content-Type-Options: nosniff
