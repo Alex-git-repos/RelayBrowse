@@ -38,3 +38,4 @@ jobs:
             "s3://${{ vars.AWS_S3_BUCKET }}/" \
             --exclude ".git/*" \
             --exclude ".github/*"
+            --delete
