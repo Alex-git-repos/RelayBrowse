@@ -210,16 +210,82 @@ function decodeBody(buf, contentType, isHtml) {
 /* ------------------------------------------------------------------ */
 
 function rewriteCss(css, base) {
+  const swap = (u) => { const abs = resolveUrl(u, base); return abs ? prox(abs) : null; };
   return css
-    .replace(/url\(\s*(['"]?)(.*?)\1\s*\)/gi, (m, q, u) => {
-      const abs = resolveUrl(u, base);
-      return abs ? `url(${q}${prox(abs)}${q})` : m;
-    })
-    .replace(/@import\s+(['"])(.*?)\1/gi, (m, q, u) => {
-      const abs = resolveUrl(u, base);
-      return abs ? `@import ${q}${prox(abs)}${q}` : m;
-    });
+    .replace(/url\(\s*(['"]?)(.*?)\1\s*\)/gi, (m, q, u) => { const p = swap(u); return p ? `url(${q}${p}${q})` : m; })
+    .replace(/@import\s+(['"])(.*?)\1/gi, (m, q, u) => { const p = swap(u); return p ? `@import ${q}${p}${q}` : m; })
+    // image-set("a.png" 1x, "b.png" 2x): plain strings, which the url() pass above can't see.
+    .replace(/((?:-webkit-)?image-set\()([^)]*)\)/gi, (m, head, inner) =>
+      head + inner.replace(/(["'])(?!\/proxy\?url=)(.*?)\1/g, (mm, q, u) => { const p = swap(u); return p ? q + p + q : mm; }) + ')');
 }
+
+/* JavaScript: modules resolve their imports against the URL they were loaded
+   from, which for us is /proxy?url=..., so "./util.js" would land on this
+   server instead of the real site. Imports are therefore rewritten to proxy
+   URLs here, dynamic import() goes through window.__PXI (see inject.js), and
+   import.meta.url reports the module's real address. Bare names ("react")
+   are left alone for the page's import map. */
+const MODULE_SPEC = /^(?:\.{0,2}\/|[a-z][a-z0-9+.-]*:\/\/)/i;
+const jsonLit = (v) => JSON.stringify(v).replace(/</g, '\\u003c');
+
+function modSpec(s, base) {
+  if (!MODULE_SPEC.test(s) || /^\/proxy\?url=/.test(s)) return null;
+  const abs = resolveUrl(s, base);
+  return abs ? prox(abs) : null;
+}
+
+function rewriteJs(js, base) {
+  if (!/\b(?:import|export)\b/.test(js)) return js;
+  const baseLit = jsonLit(base);
+  const swap = (m, pre, q, s) => { const p = modSpec(s, base); return p ? pre + q + p + q : m; };
+  return js
+    .replace(/(\bfrom\s*)(["'])([^"'\n\\]{1,2048})\2/g, swap)               // import x from '..' / export * from '..'
+    .replace(/((?<![.\w$])import\s*)(["'])([^"'\n\\]{1,2048})\2/g, swap)     // import '..'
+    .replace(/(?<![.\w$])import\s*\(/g, () => `__PXI(${baseLit},`)            // import(..)
+    .replace(/(?<![.\w$])import\.meta\.url\b/g, () => `(${baseLit})`);
+}
+
+function rewriteImportMap(text, base) {
+  let map;
+  try { map = JSON.parse(text); } catch { return text; }
+  const fix = (o) => {
+    if (!o || typeof o !== 'object') return o;
+    const out = {};
+    for (const [k, v] of Object.entries(o)) {
+      // A trailing "/" marks a prefix mapping, which can't survive being wrapped in a query string.
+      const nk = MODULE_SPEC.test(k) && !k.endsWith('/') ? modSpec(k, base) || k : k;
+      out[nk] = typeof v === 'string' && !v.endsWith('/') ? (modSpec(v, base) || v) : v;
+    }
+    return out;
+  };
+  if (map.imports) map.imports = fix(map.imports);
+  if (map.scopes && typeof map.scopes === 'object') for (const s of Object.keys(map.scopes)) map.scopes[s] = fix(map.scopes[s]);
+  return JSON.stringify(map).replace(/</g, '\\u003c');
+}
+
+/** srcset="a.png 1x,b.png 2x": commas may or may not be followed by a space. */
+function mapSrcset(value, fn) {
+  return value.replace(/\s*([^\s,]+(?:,[^\s,]+)*)\s*([^,]*)(,|$)/g, (m, u, desc, comma) =>
+    fn(u) + (desc.trim() ? ' ' + desc.trim() : '') + (comma ? ', ' : ''));
+}
+
+// With X-Content-Type-Options: nosniff the browser refuses scripts and styles that
+// arrive as text/plain, octet-stream or with no type at all, so infer one from the name.
+const EXT_TYPES = {
+  '.js': 'text/javascript', '.mjs': 'text/javascript', '.cjs': 'text/javascript', '.css': 'text/css',
+  '.json': 'application/json', '.map': 'application/json', '.wasm': 'application/wasm',
+  '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
+  '.webp': 'image/webp', '.avif': 'image/avif', '.ico': 'image/x-icon', '.bmp': 'image/bmp',
+  '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.otf': 'font/otf',
+  '.mp4': 'video/mp4', '.webm': 'video/webm', '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg', '.wav': 'audio/wav',
+};
+function effectiveType(contentType, pathname) {
+  const base = contentType.split(';')[0].trim().toLowerCase();
+  if (base && base !== 'application/octet-stream' && base !== 'binary/octet-stream' && base !== 'text/plain') return contentType;
+  return EXT_TYPES[path.extname(pathname || '').toLowerCase()] || contentType;
+}
+const JS_TYPE = /^(?:text|application)\/(?:x-)?(?:java|ecma)script/i;
+const SCRIPT_TYPE = /^$|^module$|^(?:text|application)\/(?:x-)?(?:java|ecma)script$/i;
 
 const URL_ATTRS = [
   ['a', 'href'], ['area', 'href'], ['link', 'href'], ['image', 'href'], ['image', 'xlink:href'],
@@ -252,13 +318,17 @@ function rewriteHtml(html, pageUrl) {
     });
   }
 
-  $('[srcset]').each((_, el) => {
-    const out = $(el).attr('srcset').split(/,\s+/).map((part) => {
-      const [u, ...rest] = part.trim().split(/\s+/);
-      const abs = resolveUrl(u, base);
-      return [abs ? prox(abs) : u, ...rest].join(' ');
-    });
-    $(el).attr('srcset', out.join(', '));
+  $('[srcset], [imagesrcset]').each((_, el) => {
+    for (const a of ['srcset', 'imagesrcset']) {
+      const v = $(el).attr(a);
+      if (v) $(el).attr(a, mapSrcset(v, (u) => { const abs = resolveUrl(u, base); return abs ? prox(abs) : u; }));
+    }
+  });
+
+  // Legacy presentational attributes that still load images.
+  $('body[background], table[background], td[background], th[background]').each((_, el) => {
+    const abs = resolveUrl($(el).attr('background'), base);
+    if (abs) $(el).attr('background', prox(abs));
   });
 
   $('form').each((_, el) => {
@@ -294,6 +364,13 @@ function rewriteHtml(html, pageUrl) {
 
   $('style').each((_, el) => { $(el).text(rewriteCss($(el).text(), base)); });
   $('[style]').each((_, el) => { $(el).attr('style', rewriteCss($(el).attr('style'), base)); });
+
+  // Inline scripts: module imports and import() inside them have the same problem as external ones.
+  $('script:not([src])').each((_, el) => {
+    const type = ($(el).attr('type') || '').trim().toLowerCase();
+    if (type === 'importmap') { $(el).text(rewriteImportMap($(el).text(), base)); return; }
+    if (SCRIPT_TYPE.test(type)) { const t = $(el).text(); if (t) $(el).text(rewriteJs(t, base)); }
+  });
 
   // Patch fetch/XHR/history in the page before any of its own scripts run.
   const baseJson = JSON.stringify(base).replace(/</g, '\\u003c');
@@ -398,23 +475,31 @@ async function handleProxy(req, res, reqUrl) {
       return res.end();
     }
 
-    const contentType = upstream.headers.get('content-type') || '';
+    const rawType = upstream.headers.get('content-type') || '';
+    const contentType = effectiveType(rawType, target.pathname);
     const out = { 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff' };
     for (const h of FORWARD_RESPONSE_HEADERS) {
       const v = upstream.headers.get(h);
       if (v) out[h] = v;
     }
+    if (contentType !== rawType) out['content-type'] = contentType; // nosniff would otherwise block it
 
     const isHtml = /^(text\/html|application\/xhtml\+xml)/i.test(contentType);
     const isCss = /^text\/css/i.test(contentType);
+    const isJs = JS_TYPE.test(contentType);
+    // Scripts are only rewritten when they fit in memory; a huge bundle streams through untouched.
+    const declared = Number(upstream.headers.get('content-length')) || 0;
+    const rewritable = isHtml || isCss || (isJs && declared <= MAX_REWRITE_BYTES);
 
-    if ((isHtml || isCss) && upstream.body && req.method !== 'HEAD') {
+    if (rewritable && upstream.body && req.method !== 'HEAD' && upstream.status !== 206) {
       const buf = await readLimited(upstream.body, MAX_REWRITE_BYTES);
       const text = decodeBody(buf, contentType, isHtml);
-      const rewritten = isHtml ? rewriteHtml(text, target.href) : rewriteCss(text, target.href);
+      const rewritten = isHtml ? rewriteHtml(text, target.href)
+        : isCss ? rewriteCss(text, target.href)
+        : rewriteJs(text, target.href);
       delete out.etag;
       delete out['last-modified'];
-      out['content-type'] = `${isHtml ? 'text/html' : 'text/css'}; charset=utf-8`;
+      out['content-type'] = `${isHtml ? 'text/html' : isCss ? 'text/css' : 'text/javascript'}; charset=utf-8`;
       res.writeHead(upstream.status, out);
       return res.end(rewritten);
     }

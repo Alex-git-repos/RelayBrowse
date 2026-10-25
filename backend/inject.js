@@ -50,12 +50,121 @@
   }
 
   function proxSrcset(v) {
-    return String(v).split(/,\s+/).map(function (part) {
-      var p = part.trim().split(/\s+/);
-      if (p[0]) p[0] = prox(p[0]);
-      return p.join(' ');
-    }).join(', ');
+    // Commas may or may not be followed by a space: "a.png 1x,b.png 2x".
+    return String(v).replace(/\s*([^\s,]+(?:,[^\s,]+)*)\s*([^,]*)(,|$)/g, function (m, u, desc, comma) {
+      return prox(u) + (desc.trim() ? ' ' + desc.trim() : '') + (comma ? ', ' : '');
+    });
   }
+
+  /** url(...) and @import inside CSS text set from script (style.cssText, insertRule, <style> text). */
+  function proxCss(css) {
+    var s = String(css);
+    if (s.indexOf('url(') < 0 && s.indexOf('@import') < 0 && s.indexOf('image-set') < 0) return s;
+    return s
+      .replace(/url\(\s*(['"]?)(.*?)\1\s*\)/gi, function (m, q, u) { var p = prox(u); return p !== u ? 'url(' + q + p + q + ')' : m; })
+      .replace(/@import\s+(['"])(.*?)\1/gi, function (m, q, u) { var p = prox(u); return p !== u ? '@import ' + q + p + q : m; })
+      .replace(/((?:-webkit-)?image-set\()([^)]*)\)/gi, function (m, head, inner) {
+        return head + inner.replace(/(["'])(?!\/proxy\?url=)(.*?)\1/g, function (mm, q, u) { var p = prox(u); return p !== u ? q + p + q : mm; }) + ')';
+      });
+  }
+
+  /* ---------------- the sandbox's missing storage ---------------- */
+
+  // The page runs in an opaque origin (sandbox without allow-same-origin), where
+  // localStorage, sessionStorage, document.cookie, indexedDB and CacheStorage throw
+  // SecurityError. Plenty of scripts touch them at startup and die, taking the whole
+  // page with them, so give them in-memory stand-ins that last for this page view.
+  function throws(fn) { try { fn(); return false; } catch (e) { return true; } }
+
+  function makeStorage() {
+    var data = Object.create(null);
+    var methods = {
+      getItem: function (k) { k = String(k); return k in data ? data[k] : null; },
+      setItem: function (k, v) { data[String(k)] = String(v); },
+      removeItem: function (k) { delete data[String(k)]; },
+      clear: function () { data = Object.create(null); },
+      key: function (i) { var ks = Object.keys(data); return i >= 0 && i < ks.length ? ks[i] : null; },
+    };
+    return new Proxy(methods, {
+      get: function (t, p) {
+        if (p === 'length') return Object.keys(data).length;
+        if (typeof p === 'symbol') return p === Symbol.toStringTag ? 'Storage' : undefined;
+        if (p in data) return data[p];
+        return methods[p];
+      },
+      set: function (t, p, v) { if (typeof p === 'string') data[p] = String(v); return true; },
+      deleteProperty: function (t, p) { delete data[p]; return true; },
+      has: function (t, p) { return p in data || p in methods; },
+      ownKeys: function () { return Object.keys(data); },
+      getOwnPropertyDescriptor: function (t, p) {
+        return p in data ? { value: data[p], writable: true, enumerable: true, configurable: true } : undefined;
+      },
+    });
+  }
+
+  var opaque = throws(function () { return window.localStorage; }); // true inside the sandbox
+
+  ['localStorage', 'sessionStorage'].forEach(function (name) {
+    if (!throws(function () { return window[name]; })) return;
+    var store = makeStorage();
+    try { Object.defineProperty(window, name, { configurable: true, enumerable: true, get: function () { return store; } }); } catch (e) { /* ignore */ }
+  });
+
+  if (throws(function () { return document.cookie; })) {
+    var jar = Object.create(null);
+    try {
+      Object.defineProperty(Document.prototype, 'cookie', {
+        configurable: true,
+        enumerable: true,
+        get: function () { return Object.keys(jar).map(function (k) { return k + '=' + jar[k]; }).join('; '); },
+        set: function (line) {
+          var parts = String(line).split(';'), kv = parts[0], eq = kv.indexOf('=');
+          var name = (eq < 0 ? '' : kv.slice(0, eq)).trim(), val = eq < 0 ? kv.trim() : kv.slice(eq + 1).trim();
+          var expired = false;
+          for (var i = 1; i < parts.length; i++) {
+            var a = parts[i].trim().toLowerCase();
+            if (a.indexOf('max-age=') === 0 && parseInt(a.slice(8), 10) <= 0) expired = true;
+            if (a.indexOf('expires=') === 0 && Date.parse(a.slice(8)) <= Date.now()) expired = true;
+          }
+          if (expired) delete jar[name]; else jar[name] = val;
+        },
+      });
+    } catch (e) { /* ignore */ }
+  }
+
+  // Better "not supported" (libraries then fall back) than a SecurityError at first use.
+  if (opaque) {
+    ['indexedDB', 'caches'].forEach(function (name) {
+      try { Object.defineProperty(window, name, { configurable: true, value: undefined }); } catch (e) { /* ignore */ }
+    });
+  }
+
+  /* ---------------- what the page believes its own address is ---------------- */
+
+  // location itself can't be replaced, but these can, and scripts read them for
+  // base URLs, same-site checks and feature gating.
+  var pageUrl = function () { return current; };
+  function defGetter(proto, prop, fn) {
+    try { Object.defineProperty(proto, prop, { configurable: true, enumerable: true, get: fn }); } catch (e) { /* ignore */ }
+  }
+  defGetter(Document.prototype, 'URL', pageUrl);
+  defGetter(Document.prototype, 'documentURI', pageUrl);
+  defGetter(Node.prototype, 'baseURI', function () { return BASE; });
+  defGetter(Document.prototype, 'domain', function () { try { return new URL(current).hostname; } catch (e) { return ''; } });
+  defGetter(window, 'origin', function () { try { return new URL(current).origin; } catch (e) { return 'null'; } });
+
+  /* ---------------- dynamic import() ---------------- */
+
+  // The server rewrites every import() in scripts it serves to __PXI(<script's real URL>, spec).
+  // Relative names resolve against the script's real address and then go through the proxy;
+  // bare names (import maps) and data:/blob: URLs are passed on unchanged.
+  window.__PXI = function (base, spec, opts) {
+    var s = String(spec);
+    if (/^(?:\.{0,2}\/|[a-z][a-z0-9+.-]*:\/\/)/i.test(s)) {
+      try { s = prox(new URL(s, base).href); } catch (e) { /* let import() report it */ }
+    }
+    return opts === undefined ? import(s) : import(s, opts);
+  };
 
   /* ---------------- network ---------------- */
 
@@ -189,8 +298,65 @@
     if (has.call(ATTRS, n) && ATTRS[n].test(tag)) value = prox(value);
     else if (n === 'xlink:href' && tag === 'image') value = prox(value);
     else if (n === 'srcset' && (tag === 'img' || tag === 'source')) value = proxSrcset(value);
+    else if (n === 'style') value = proxCss(value);
     return nativeSetAttribute.call(this, name, value);
   };
+
+  // new Audio('song.mp3') sets src internally, without going through the setter patched above.
+  if (window.Audio) {
+    var NativeAudio = window.Audio;
+    var ProxiedAudio = function (src) {
+      var a = new NativeAudio();
+      if (src !== undefined) a.src = src;
+      return a;
+    };
+    ProxiedAudio.prototype = NativeAudio.prototype;
+    window.Audio = ProxiedAudio;
+  }
+
+  // Backgrounds, cursors, masks and the like set from script: el.style.backgroundImage = 'url(/a.png)'.
+  var CSS_PROPS = ['background', 'backgroundImage', 'border', 'borderImage', 'borderImageSource', 'content', 'cursor',
+    'filter', 'listStyle', 'listStyleImage', 'mask', 'maskImage', 'webkitMaskImage', 'webkitMaskBoxImage', 'shapeOutside', 'src'];
+  [window.CSSStyleDeclaration, window.CSSStyleProperties].forEach(function (C) {
+    if (!C) return;
+    CSS_PROPS.forEach(function (p) {
+      patchProp(C.prototype, p, proxCss);
+      patchProp(C.prototype, p.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); }), proxCss);
+    });
+    patchProp(C.prototype, 'cssText', proxCss);
+    var nativeSetProperty = C.prototype.setProperty;
+    if (nativeSetProperty && !has.call(C.prototype, '__proxPatched')) {
+      Object.defineProperty(C.prototype, '__proxPatched', { value: true });
+      C.prototype.setProperty = function (name, value, priority) {
+        return nativeSetProperty.call(this, name, typeof value === 'string' ? proxCss(value) : value, priority);
+      };
+    }
+  });
+  if (window.CSSStyleSheet) {
+    var sheetProto = CSSStyleSheet.prototype;
+    ['insertRule', 'replace', 'replaceSync'].forEach(function (m) {
+      var native = sheetProto[m];
+      if (!native) return;
+      sheetProto[m] = function (css) {
+        var args = Array.prototype.slice.call(arguments);
+        args[0] = proxCss(css);
+        return native.apply(this, args);
+      };
+    });
+  }
+
+  // document.write('<script src="/x.js">') is plain text, so rewrite its URL attributes before it is parsed.
+  function proxHtml(s) {
+    return String(s).replace(/(\b(?:src|href|poster|data)\s*=\s*)(["'])([^"']*)\2/gi, function (m, a, q, u) { return a + q + prox(u) + q; });
+  }
+  ['write', 'writeln'].forEach(function (m) {
+    var native = Document.prototype[m];
+    if (!native) return;
+    Document.prototype[m] = function () {
+      var args = Array.prototype.map.call(arguments, function (x) { return typeof x === 'string' ? proxHtml(x) : x; });
+      return native.apply(this, args);
+    };
+  });
 
   /** Rewrites the URL attributes of one element, if they aren't already ours. */
   function fixAttrs(el) {
@@ -208,22 +374,39 @@
       v = el.getAttribute('srcset'); p = proxSrcset(v);
       if (p !== v) nativeSetAttribute.call(el, 'srcset', p);
     }
+    if (el.hasAttribute('style')) {
+      v = el.getAttribute('style'); p = proxCss(v);
+      if (p !== v) nativeSetAttribute.call(el, 'style', p);
+    }
+  }
+
+  /** <style> elements filled in by script (textContent = '...', innerHTML) never saw the server's CSS rewriter. */
+  function fixStyleEl(el) {
+    var v = el.textContent, p = proxCss(v);
+    if (p !== v) el.textContent = p; // second pass changes nothing, so this settles
   }
 
   // Content added with innerHTML / insertAdjacentHTML never passed through the server's rewriter.
   var SELECTOR = 'a[href],area[href],link[href],script[src],img[src],img[srcset],source[src],source[srcset],' +
-    'video[src],video[poster],audio[src],track[src],iframe[src],frame[src],embed[src],object[data],input[src],image[href]';
+    'video[src],video[poster],audio[src],track[src],iframe[src],frame[src],embed[src],object[data],input[src],image[href],[style]';
   if (window.MutationObserver) {
     new MutationObserver(function (records) {
       for (var i = 0; i < records.length; i++) {
         var added = records[i].addedNodes;
         for (var j = 0; j < added.length; j++) {
           var node = added[j];
+          if (node.nodeType === 3) { // text put into an existing <style>
+            if (node.parentNode && node.parentNode.localName === 'style') fixStyleEl(node.parentNode);
+            continue;
+          }
           if (node.nodeType !== 1) continue;
           fixAttrs(node);
+          if (node.localName === 'style') fixStyleEl(node);
           if (node.querySelectorAll) {
             var found = node.querySelectorAll(SELECTOR);
             for (var k = 0; k < found.length; k++) fixAttrs(found[k]);
+            var styles = node.querySelectorAll('style');
+            for (var s = 0; s < styles.length; s++) fixStyleEl(styles[s]);
           }
         }
       }
