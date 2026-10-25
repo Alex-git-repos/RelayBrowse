@@ -47,7 +47,7 @@ There are two pages, kept apart on purpose:
   and is marked `noindex`, so search engines never index it.
 
 **Rename `m-8c1f3e/` to something of your own before deploying, and set `window.APP_GATE` in `frontend/config.js`
-to the new folder name (with a trailing slash).** Open `https://your-frontend/<your-folder>/`, enter the access key once, and it is remembered on that
+to `<your-folder>/index.html`.** Open `https://your-frontend/<your-folder>/`, enter the access key once, and it is remembered on that
 device. Visiting the root without a saved sign-in, or after one expires, redirects there automatically (an optional `?go=` is carried through).
 You can also sign in with a link: `https://your-frontend/<your-folder>/#key=SECRET`.
 

@@ -29,7 +29,7 @@
     home.hidden = true; shell.hidden = true; locked.hidden = false;
     view.src = 'about:blank';
     var gate = String(window.APP_GATE || '');
-    if (!/^[\w-][\w\-.]*\/$/.test(gate)) return; // a single sibling folder name only
+    if (!/^[\w-][\w\-.]*\/index\.html$/.test(gate)) return; // <sibling folder>/index.html only
     var go = new URLSearchParams(location.search).get('go');
     location.replace(gate + (go ? '?go=' + encodeURIComponent(go) : ''));
   }

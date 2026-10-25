@@ -28,7 +28,7 @@
   // Back to the main page, carrying over an optional ?go= from the link used to get here.
   function leave() {
     var go = new URLSearchParams(location.search).get('go');
-    location.replace('../' + (go ? '?go=' + encodeURIComponent(go) : ''));
+    location.replace('../index.html' + (go ? '?go=' + encodeURIComponent(go) : ''));
   }
 
   function attempt(key) {
