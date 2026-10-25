@@ -66,8 +66,8 @@ iframe{flex:1;width:100%;border:0;background:#fff}
 </head>
 <body>
 
-<!-- Shown to anyone without a saved sign-in. Deliberately says nothing about what this site is,
-     and does not link to the sign-in page (that address lives only in browsers that have visited it). -->
+<!-- Fallback shown briefly (or if the redirect fails) to anyone without a saved sign-in, who is
+     otherwise sent straight to the sign-in page (APP_GATE in config.js). Says nothing about what this site is. -->
 <main class="home" id="locked" hidden>
   <h1>Not available</h1>
   <p class="lead">This page isn&rsquo;t available right now.</p>

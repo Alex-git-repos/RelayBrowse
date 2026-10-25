@@ -42,13 +42,13 @@ The backend URL is in `frontend/config.js`. Serve the `frontend/` folder from an
 
 There are two pages, kept apart on purpose:
 
-- `index.html` is the browser itself. Without a saved sign-in it shows a plain "Not available" page and links nowhere.
+- `index.html` is the browser itself. Without a saved sign-in it redirects to the sign-in page (a plain "Not available" page is only a fallback if the redirect fails).
 - `m-8c1f3e/` is the sign-in page. It says nothing about what the site is, loads nothing from third parties,
-  is marked `noindex`, and is not linked from anywhere, so search engines never find it.
+  and is marked `noindex`, so search engines never index it.
 
-**Rename `m-8c1f3e/` to something of your own before deploying.** No code changes are needed; the page
-learns its own address. Open `https://your-frontend/<your-folder>/`, enter the access key once, and it is remembered on that
-device. Bookmark the address. A browser that has signed in before is sent back there automatically if its sign-in expires.
+**Rename `m-8c1f3e/` to something of your own before deploying, and set `window.APP_GATE` in `frontend/config.js`
+to the new folder name (with a trailing slash).** Open `https://your-frontend/<your-folder>/`, enter the access key once, and it is remembered on that
+device. Visiting the root without a saved sign-in, or after one expires, redirects there automatically (an optional `?go=` is carried through).
 You can also sign in with a link: `https://your-frontend/<your-folder>/#key=SECRET`.
 
 > **If this repository is public, the folder name is public too**, and so is anything in `RelayBrowse.env` from

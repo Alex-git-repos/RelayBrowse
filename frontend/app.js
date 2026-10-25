@@ -7,7 +7,6 @@
   var STORE_KEY = 'relay-recent';
   var TOKEN_KEY = 'app.t';                 // written by the sign-in page
   var LEGACY_TOKEN_KEY = 'relay-frame-token';
-  var GATE_KEY = 'app.g';                  // where the sign-in page lives, known only to browsers that have been there
   var API = String(window.APP_API || window.RELAY_BACKEND || '').replace(/\/+$/, '');
 
   function loadToken() {
@@ -23,14 +22,16 @@
   function saveToken(t) { try { if (t) localStorage.setItem(TOKEN_KEY, t); else localStorage.removeItem(TOKEN_KEY); } catch (e) {} }
   var frameToken = loadToken();
 
-  // Not signed in: hand over to the sign-in page if this browser knows it, otherwise
-  // show a plain "not available" page. Nothing on this page links to the sign-in page.
+  // Not signed in: send the visitor to the sign-in page (APP_GATE in config.js). The "not available"
+  // page stays visible only as a fallback if the redirect can't happen. An optional ?go= is carried
+  // along so the sign-in page can return to it afterwards.
   function toGate() {
     home.hidden = true; shell.hidden = true; locked.hidden = false;
     view.src = 'about:blank';
-    var path = '';
-    try { path = localStorage.getItem(GATE_KEY) || ''; } catch (e) {}
-    if (/^\/(?!\/)[\w\-./]*$/.test(path)) location.replace(path); // same-site paths only
+    var gate = String(window.APP_GATE || '');
+    if (!/^[\w-][\w\-.]*\/$/.test(gate)) return; // a single sibling folder name only
+    var go = new URLSearchParams(location.search).get('go');
+    location.replace(gate + (go ? '?go=' + encodeURIComponent(go) : ''));
   }
 
   function normalize(raw) {

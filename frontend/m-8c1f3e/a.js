@@ -4,10 +4,6 @@
   var form = $('f'), field = $('k'), btn = $('b'), msg = $('m');
   var API = String(window.APP_API || '').replace(/\/+$/, '');
   var TOKEN_KEY = 'app.t';   // read by ../app.js
-  var GATE_KEY = 'app.g';    // lets ../ find its way back here, only on devices that have been here
-
-  // Remember where this page lives (on this device only); nothing links here.
-  try { localStorage.setItem(GATE_KEY, location.pathname); } catch (e) { /* storage blocked */ }
 
   function say(text) { msg.textContent = text || ''; }
 
