@@ -18,8 +18,6 @@ jobs:
   deploy:
     name: Sync files to S3
     runs-on: ubuntu-latest
-    environment:
-      name: autodeploy
 
     steps:
       - name: Check out repository
@@ -39,5 +37,5 @@ jobs:
           aws s3 sync ./frontend/ \
             "s3://${{ vars.AWS_S3_BUCKET }}/" \
             --exclude ".git/*" \
-            --exclude ".github/*"
+            --exclude ".github/*" \
             --delete
