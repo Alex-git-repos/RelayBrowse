@@ -18,7 +18,8 @@ jobs:
   deploy:
     name: Sync files to S3
     runs-on: ubuntu-latest
-    environment: autodeploy
+    environment:
+      name: autodeploy
 
     steps:
       - name: Check out repository
