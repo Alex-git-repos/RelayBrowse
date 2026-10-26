@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow, noarchive">
 <meta name="referrer" content="no-referrer">
+<!-- Pages now open inside this document (no iframe sandbox), so only our own scripts may run:
+     no inline scripts, no inline event handlers, no javascript: URLs, no frames or plugins. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https: http://localhost:*; font-src https: data:; img-src https: http: data: blob:; media-src https: http: blob:; connect-src https: http://localhost:*; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'self'">
 <title>Relay Browse</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -59,7 +62,7 @@ h1{font:800 clamp(2.4rem,7vw,4rem)/1.04 var(--display);letter-spacing:-0.025em;m
 .progress{position:absolute;left:0;bottom:-1px;height:3px;width:100%;background:var(--accent);transform-origin:left;transform:scaleX(0);opacity:0}
 .progress.on{opacity:1;animation:load 2.2s ease-out forwards}
 @keyframes load{from{transform:scaleX(0)}to{transform:scaleX(.9)}}
-iframe{flex:1;width:100%;border:0;background:#fff}
+#view{flex:1;min-height:0;overflow:auto;background:#fff}
 @media (prefers-reduced-motion:reduce){.progress.on{animation:none;transform:scaleX(.6)}}
 @media (max-width:520px){.go{flex-direction:column;box-shadow:4px 4px 0 var(--ink)}}
 </style>
@@ -94,7 +97,7 @@ iframe{flex:1;width:100%;border:0;background:#fff}
     <button class="chip" type="button" data-go="https://news.ycombinator.com">news.ycombinator.com</button>
   </div>
 
-  <p class="note">Simple sites work best. Pages that need sign-in, video streaming, or heavy scripts may not load correctly. <button class="chip" id="forgetBtn" type="button">Forget access key</button></p>
+  <p class="note">Simple sites work best. Pages are shown without their scripts, so anything that depends on JavaScript (sign-in, video players, web apps) won&rsquo;t work. <button class="chip" id="forgetBtn" type="button">Forget access key</button></p>
 </main>
 
 <div class="shell" id="shell" hidden>
@@ -106,9 +109,10 @@ iframe{flex:1;width:100%;border:0;background:#fff}
     <form class="addr" id="addrForm"><input id="addr" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Address"></form>
     <div class="progress" id="progress" aria-hidden="true"></div>
   </div>
-  <iframe id="view" title="Proxied page" referrerpolicy="no-referrer" sandbox="allow-scripts allow-forms" allow="camera 'none'; microphone 'none'; geolocation 'none'; clipboard-read 'none'; clipboard-write 'none'; display-capture 'none'; payment 'none'"></iframe>
+  <div id="view" role="document" aria-label="Proxied page"></div>
 </div>
 
+<script src="htmx.min.js"></script>
 <script src="config.js"></script>
 <script src="app.js"></script>
 </body>

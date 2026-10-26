@@ -158,6 +158,10 @@ function resolveUrl(value, base) {
 }
 
 function errorPage(res, status, title, message) {
+  if (res.__fragment) { // shown inside the shell's shadow root, where <body>/<style> rules don't apply
+    res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+    return res.end(`<div class="pv-doc" style="padding:48px 24px;font:17px/1.6 system-ui,sans-serif;max-width:460px;margin:0 auto"><h1 style="font-size:1.6rem;margin:0 0 10px">${esc(title)}</h1><p style="margin:0;color:#5a6579">${esc(message)}</p></div>`);
+  }
   const body = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(title)}</title>
 <style>
@@ -209,14 +213,30 @@ function decodeBody(buf, contentType, isHtml) {
 /* Rewriting                                                            */
 /* ------------------------------------------------------------------ */
 
-function rewriteCss(css, base) {
-  const swap = (u) => { const abs = resolveUrl(u, base); return abs ? prox(abs) : null; };
-  return css
+/** html/body/:root rules mean nothing inside a shadow root; point them at the wrapper div instead. */
+function scopeCss(css) {
+  return css.replace(/([^{};]+)\{/g, (m, sel) =>
+    sel.replace(/(^|[\s,>+~(])(?:html|body|:root)(?![\w-])/g, '$1.pv-doc').replace(/\.pv-doc\s+\.pv-doc/g, '.pv-doc') + '{');
+}
+
+// opts.origin: prefix for URLs that end up in a page on another origin (htmx fragments).
+// opts.scoped: the CSS is for a fragment, so rewrite html/body selectors (see scopeCss).
+function rewriteCss(css, base, opts = {}) {
+  const origin = opts.origin || '';
+  const swap = (u, extra = '') => {
+    if (u.startsWith('/proxy?url=') || (origin && u.startsWith(origin + '/proxy?url='))) return null; // already ours
+    const abs = resolveUrl(u, base);
+    return abs ? origin + prox(abs) + extra : null;
+  };
+  const impExtra = opts.scoped ? '&__ps=1' : ''; // an @imported stylesheet needs scoping too
+  const out = css
+    .replace(/@import\s+url\(\s*(['"]?)(.*?)\1\s*\)/gi, (m, q, u) => { const p = swap(u, impExtra); return p ? `@import url(${q}${p}${q})` : m; })
     .replace(/url\(\s*(['"]?)(.*?)\1\s*\)/gi, (m, q, u) => { const p = swap(u); return p ? `url(${q}${p}${q})` : m; })
-    .replace(/@import\s+(['"])(.*?)\1/gi, (m, q, u) => { const p = swap(u); return p ? `@import ${q}${p}${q}` : m; })
+    .replace(/@import\s+(['"])(.*?)\1/gi, (m, q, u) => { const p = swap(u, impExtra); return p ? `@import ${q}${p}${q}` : m; })
     // image-set("a.png" 1x, "b.png" 2x): plain strings, which the url() pass above can't see.
     .replace(/((?:-webkit-)?image-set\()([^)]*)\)/gi, (m, head, inner) =>
       head + inner.replace(/(["'])(?!\/proxy\?url=)(.*?)\1/g, (mm, q, u) => { const p = swap(u); return p ? q + p + q : mm; }) + ')');
+  return opts.scoped ? scopeCss(out) : out;
 }
 
 /* JavaScript: modules resolve their imports against the URL they were loaded
@@ -387,7 +407,132 @@ function rewriteHtml(html, pageUrl) {
 /* /proxy                                                               */
 /* ------------------------------------------------------------------ */
 
-const FORWARD_RESPONSE_HEADERS = ['content-type', 'cache-control', 'last-modified', 'etag', 'content-language', 'content-disposition'];
+/* ------------------------------------------------------------------ */
+/* htmx fragments                                                       */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The htmx frontend asks for /proxy?...&__pf=1 and gets back an HTML *fragment*
+ * instead of a whole page: the page's styles plus its <body>, which the shell
+ * drops into a shadow root in its own DOM. There is no iframe sandbox any more,
+ * so the fragment is scrubbed hard: no scripts, no inline handlers, no frames,
+ * and no hx-* attributes from the site (htmx would act on them). Links and forms
+ * are replaced with our own hx-get/hx-post, and every resource URL is absolute
+ * (PUBLIC_URL, or taken from the request) because the page is no longer served from here.
+ */
+
+const PUBLIC_URL = (process.env.PUBLIC_URL || '').replace(/\/+$/, '');
+function publicOrigin(req) {
+  if (PUBLIC_URL) return PUBLIC_URL;
+  const proto = TRUST_PROXY && /^https\b/i.test(String(req.headers['x-forwarded-proto'] || '')) ? 'https' : 'http';
+  const host = /^[\w.\-:[\]]+$/.test(req.headers.host || '') ? req.headers.host : 'localhost';
+  return `${proto}://${host}`;
+}
+
+/** Header value for the shell's address bar. Non-ASCII is \u-escaped because HTTP headers can't carry it. */
+function navHeader(url, title) {
+  return JSON.stringify({ 'proxy-nav': { url, title } }).replace(/[\u007f-￿]/g, (c) => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
+}
+
+const ALWAYS_DROP_ATTRS = new Set(['srcdoc', 'integrity', 'nonce', 'crossorigin', 'ping', 'target', 'formaction']);
+const SCRIPTY_URL = /^\s*(?:javascript|vbscript|data:text\/html)/i;
+
+function rewriteFragment(html, pageUrl, origin) {
+  const $ = cheerio.load(html, { scriptingEnabled: false }); // <noscript> content becomes real markup
+  let base = pageUrl;
+  const baseTag = $('base[href]').first();
+  if (baseTag.length) { try { base = new URL(baseTag.attr('href'), pageUrl).href; } catch { /* ignore */ } }
+  const P = (abs, extra = '') => origin + prox(abs) + extra;
+
+  $('noscript').each((_, el) => { $(el).replaceWith($(el).contents()); });
+  const title = $('title').first().text().replace(/\s+/g, ' ').trim().slice(0, 120);
+  $('script, iframe, frame, frameset, object, embed, applet, base, meta, template, title, link:not([rel~="stylesheet"])').remove();
+
+  // Anything that could run code, or be picked up by the shell's htmx, goes.
+  $('*').each((_, el) => {
+    const a = el.attribs;
+    if (!a) return;
+    for (const name of Object.keys(a)) {
+      const n = name.toLowerCase();
+      if (/^(?:on|hx-|data-hx-)/.test(n) || ALWAYS_DROP_ATTRS.has(n)) delete a[name];
+      else if (/^(?:href|xlink:href|src|action|data|poster|background)$/.test(n) && SCRIPTY_URL.test(a[name])) delete a[name];
+    }
+  });
+
+  // Links navigate by htmx; the plain href stays so "open in new tab" still works.
+  $('a[href], area[href]').each((_, el) => {
+    const abs = resolveUrl($(el).attr('href'), base);
+    if (!abs) return; // #anchors, mailto:, tel: are left alone (the shell scrolls anchors itself)
+    $(el).attr({ href: P(abs), 'hx-get': P(abs, '&__pf=1'), 'hx-swap': 'none' });
+  });
+
+  for (const [tag, attr] of URL_ATTRS) {
+    if (['a', 'area', 'iframe', 'frame', 'embed', 'object'].includes(tag)) continue;
+    $(tag).each((_, el) => {
+      const abs = resolveUrl($(el).attr(attr), base);
+      if (abs) $(el).attr(attr, P(abs, tag === 'link' ? '&__ps=1' : ''));
+    });
+  }
+  $('[srcset], [imagesrcset]').each((_, el) => {
+    for (const a of ['srcset', 'imagesrcset']) {
+      const v = $(el).attr(a);
+      if (v) $(el).attr(a, mapSrcset(v, (u) => { const abs = resolveUrl(u, base); return abs ? P(abs) : u; }));
+    }
+  });
+  $('body[background], table[background], td[background], th[background]').each((_, el) => {
+    const abs = resolveUrl($(el).attr('background'), base);
+    if (abs) $(el).attr('background', P(abs));
+  });
+
+  $('form').each((_, el) => {
+    const $f = $(el);
+    const abs = resolveUrl($f.attr('action') || '', base) || base;
+    const post = ($f.attr('method') || 'get').toLowerCase() === 'post';
+    const multipart = /multipart/i.test($f.attr('enctype') || '');
+    $f.removeAttr('action').removeAttr('method').removeAttr('enctype').attr('hx-swap', 'none');
+    if (post) {
+      $f.attr('hx-post', P(abs, '&__pf=1'));
+      if (multipart) $f.attr('hx-encoding', 'multipart/form-data');
+    } else {
+      // A GET form replaces the action's query string with its fields, so the real target
+      // travels in a hidden field and the server rebuilds it (same trick as the iframe version).
+      $f.attr('hx-get', origin + '/proxy');
+      $f.prepend(`<input type="hidden" name="__pt" value="${FRAME_TOKEN}"><input type="hidden" name="__pa" value="${esc(abs)}"><input type="hidden" name="__pf" value="1">`);
+    }
+  });
+
+  $('[style]').each((_, el) => { $(el).attr('style', rewriteCss($(el).attr('style'), base, { origin })); });
+
+  // Styles move to the front of the fragment; selectors for html/body are redirected to the wrapper.
+  const sheets = [];
+  $('link[rel~="stylesheet"], style').each((_, el) => {
+    if (el.name === 'style') $(el).text(rewriteCss($(el).text(), base, { origin, scoped: true }));
+    sheets.push($.html(el));
+  }).remove();
+
+  const $body = $('body').first();
+  const cls = ['pv-doc', $body.attr('class'), $('html').attr('class')].filter(Boolean).join(' ');
+  const bg = $body.attr('bgcolor') ? `background-color:${$body.attr('bgcolor')};` : '';
+  const style = bg + ($body.attr('style') || '');
+  return {
+    title,
+    html: `<div class="${esc(cls)}"${style ? ` style="${esc(style)}"` : ''}>${sheets.join('')}${$body.html() || ''}</div>`,
+  };
+}
+
+/** Images, video and audio can be shown directly; anything else gets a link. */
+function nonHtmlFragment(type, abs, origin) {
+  const src = esc(origin + prox(abs));
+  const t = String(type).split(';')[0].trim().toLowerCase();
+  let inner;
+  if (t.startsWith('image/')) inner = `<img src="${src}" style="max-width:100%">`;
+  else if (t.startsWith('video/')) inner = `<video src="${src}" controls style="max-width:100%"></video>`;
+  else if (t.startsWith('audio/')) inner = `<audio src="${src}" controls></audio>`;
+  else inner = `<h1 style="font-size:1.4rem;margin:0 0 10px">This file can’t be shown here</h1><p style="margin:0 0 12px;color:#5a6579">${esc(t || 'Unknown type')}</p><a href="${src}" target="_blank" rel="noopener">Open or download it</a>`;
+  return `<div class="pv-doc" style="padding:24px;font:17px/1.6 system-ui,sans-serif">${inner}</div>`;
+}
+
+const FORWARD_RESPONSE_HEADERS =['content-type', 'cache-control', 'last-modified', 'etag', 'content-language', 'content-disposition'];
 
 // Every proxied response is locked into a sandbox: opaque origin (no access to
 // the proxy UI, its storage or other sites), no top navigation, no popups,
@@ -399,6 +544,7 @@ const ISOLATION_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, HEAD, POST, OPTIONS',
   'Access-Control-Allow-Headers': '*',
+  'Access-Control-Expose-Headers': 'HX-Trigger', // htmx reads the page's real address from it
   'Referrer-Policy': 'no-referrer',
   'X-Content-Type-Options': 'nosniff',
 };
@@ -410,13 +556,21 @@ async function handleProxy(req, res, reqUrl) {
     return errorPage(res, 405, 'Method not allowed', 'This proxy supports GET and POST requests.');
   }
 
+  // __pf=1: the htmx shell wants an HTML fragment (see rewriteFragment), not a whole page.
+  // __ps=1: this stylesheet belongs to such a fragment, so html/body rules are redirected to its wrapper.
+  const fragment = reqUrl.searchParams.get('__pf') === '1';
+  const scopedCss = reqUrl.searchParams.get('__ps') === '1';
+  res.__fragment = fragment; // lets errorPage() answer in the same shape
+  const origin = fragment ? publicOrigin(req) : '';
+
   let targetStr = reqUrl.searchParams.get('url');
   const formTarget = reqUrl.searchParams.get('__pa');
   if (formTarget) {
     // Rebuild a GET form submission: real action URL + the form's fields.
-    // Only our own two fields are removed; a site field named "t" is kept.
+    // Only our own fields are removed; a site field named "t" is kept.
     reqUrl.searchParams.delete('__pa');
     reqUrl.searchParams.delete('__pt');
+    reqUrl.searchParams.delete('__pf');
     let t;
     try { t = new URL(formTarget); } catch { return errorPage(res, 400, 'Invalid address', 'The form target is not a valid URL.'); }
     t.search = '';
@@ -439,7 +593,7 @@ async function handleProxy(req, res, reqUrl) {
   const headers = {
     // Fixed identity: nothing about the user's browser is passed to sites.
     'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
-    accept: req.headers.accept || '*/*',
+    accept: fragment ? 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8' : (req.headers.accept || '*/*'),
     'accept-language': 'en-US,en;q=0.9',
     'accept-encoding': 'identity',
   };
@@ -471,7 +625,7 @@ async function handleProxy(req, res, reqUrl) {
       const next = resolveUrl(location, target.href);
       if (upstream.body) upstream.body.cancel().catch(() => {});
       if (!next) return errorPage(res, 502, 'Bad redirect', 'The site redirected to an address we can\u2019t follow.');
-      res.writeHead(upstream.status, { Location: prox(next), 'Cache-Control': 'no-store' });
+      res.writeHead(upstream.status, { Location: prox(next) + (fragment ? '&__pf=1' : ''), 'Cache-Control': 'no-store' });
       return res.end();
     }
 
@@ -491,12 +645,27 @@ async function handleProxy(req, res, reqUrl) {
     const declared = Number(upstream.headers.get('content-length')) || 0;
     const rewritable = isHtml || isCss || (isJs && declared <= MAX_REWRITE_BYTES);
 
+    // Something other than a web page was asked for as a page: show it, or offer it as a download.
+    if (fragment && !isHtml) {
+      if (upstream.body) upstream.body.cancel().catch(() => {});
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'HX-Trigger': navHeader(target.href, '') });
+      return res.end(req.method === 'HEAD' ? '' : nonHtmlFragment(contentType, target.href, origin));
+    }
+
     if (rewritable && upstream.body && req.method !== 'HEAD' && upstream.status !== 206) {
       const buf = await readLimited(upstream.body, MAX_REWRITE_BYTES);
       const text = decodeBody(buf, contentType, isHtml);
-      const rewritten = isHtml ? rewriteHtml(text, target.href)
-        : isCss ? rewriteCss(text, target.href)
-        : rewriteJs(text, target.href);
+      let rewritten;
+      if (isHtml && fragment) {
+        const f = rewriteFragment(text, target.href, origin);
+        rewritten = f.html;
+        out['HX-Trigger'] = navHeader(target.href, f.title);
+        out['Cache-Control'] = 'no-store';
+      } else {
+        rewritten = isHtml ? rewriteHtml(text, target.href)
+          : isCss ? rewriteCss(text, target.href, { scoped: scopedCss })
+          : rewriteJs(text, target.href);
+      }
       delete out.etag;
       delete out['last-modified'];
       out['content-type'] = `${isHtml ? 'text/html' : isCss ? 'text/css' : 'text/javascript'}; charset=utf-8`;
