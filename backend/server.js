@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Relay Browse: backend (API only, no UI).
+ * Pear Proxy: backend (API only, no UI).
  *
  *   POST /api/auth         { token } -> { frameToken }   (exchange the access key)
  *   GET  /proxy?url=&t=    fetch a page and rewrite it so links, images,
@@ -412,10 +412,10 @@ function rewriteHtml(html, pageUrl) {
 /* ------------------------------------------------------------------ */
 
 /*
- * The htmx frontend asks for /proxy?...&__pf=1 and gets back an HTML *fragment*
+ * Fragment clients ask for /proxy?...&__pf=1 and get back an HTML *fragment*
  * instead of a whole page: the page's styles plus its <body>, which the shell
- * drops into a shadow root in its own DOM. There is no iframe sandbox any more,
- * so the fragment is scrubbed hard: no scripts, no inline handlers, no frames,
+ * may drop into a shadow root in their own DOM. The fragment is scrubbed hard:
+ * no scripts, no inline handlers, no frames,
  * and no hx-* attributes from the site (htmx would act on them). Links and forms
  * are replaced with our own hx-get/hx-post, and every resource URL is absolute
  * (PUBLIC_URL, or taken from the request) because the page is no longer served from here.
@@ -459,7 +459,7 @@ function rewriteFragment(html, pageUrl, origin) {
     }
   });
 
-  // Links navigate by htmx; the plain href stays so "open in new tab" still works.
+  // The fragment client handles these links; the plain href stays for fallback navigation.
   $('a[href], area[href]').each((_, el) => {
     const abs = resolveUrl($(el).attr('href'), base);
     if (!abs) return; // #anchors, mailto:, tel: are left alone (the shell scrolls anchors itself)
@@ -814,7 +814,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`Relay Browse backend listening on http://${HOST}:${PORT}`);
+  console.log(`Pear Proxy backend listening on http://${HOST}:${PORT}`);
   if (ALLOW_PRIVATE) console.warn('WARNING: ALLOW_PRIVATE=1, private network targets are reachable. Use for testing only.');
   else if (process.env.ALLOW_PRIVATE) console.warn(`Note: ALLOW_PRIVATE="${process.env.ALLOW_PRIVATE}" is ignored. Only the exact value 1 enables it; private targets stay blocked.`);
   if (GENERATED_TOKEN) console.warn(`WARNING: AUTH_TOKEN is not set. Using a random key for this run only: ${AUTH_TOKEN}`);

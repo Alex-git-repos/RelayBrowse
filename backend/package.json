@@ -1,7 +1,7 @@
 {
-  "name": "relay-browse-backend",
+  "name": "pear-proxy-backend",
   "version": "3.0.0",
-  "description": "Relay Browse backend: a web proxy with URL rewriting (API only)",
+  "description": "Pear Proxy backend: a web proxy with URL rewriting (API only)",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"

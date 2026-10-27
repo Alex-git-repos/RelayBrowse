@@ -212,7 +212,9 @@
     var nativeBeacon = navigator.sendBeacon;
     navigator.sendBeacon = function (u, d) { return nativeBeacon.call(navigator, prox(u), d); };
   }
-  if (navigator.serviceWorker) { try { Object.defineProperty(navigator, 'serviceWorker', { value: undefined }); } catch (e) { /* ignore */ } }
+  try {
+    if (navigator.serviceWorker) Object.defineProperty(navigator, 'serviceWorker', { value: undefined });
+  } catch (e) { /* service workers are unavailable in the opaque sandbox */ }
 
   /* ---------------- address bar reporting + history ---------------- */
 

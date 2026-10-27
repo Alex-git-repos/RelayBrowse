@@ -1,4 +1,4 @@
-# Relay Browse
+# Pear Proxy
 
 Split into two deployable parts:
 
@@ -14,7 +14,7 @@ Split into two deployable parts:
 | `AUTH_TOKEN`      | Your access key. If unset, a random one is printed at startup. |
 | `FRONTEND_ORIGIN` | Where the frontend is hosted (CORS, `frame-ancestors`, and the only origin pages may talk to). Set this in production. |
 | `TRUST_PROXY=1`   | Needed on Render so rate limiting sees real client IPs. |
-| `PUBLIC_URL`      | The backend's own public address (e.g. `https://relaybrowse.onrender.com`). Used for the links inside page fragments; if unset it is taken from the request's `Host` header (and `X-Forwarded-Proto` when `TRUST_PROXY=1`). It must match `APP_API` in `frontend/config.js`. |
+| `PUBLIC_URL`      | The backend's own public address (e.g. `https://relaybrowse.onrender.com`). Used by fragment responses; if unset it is taken from the request's `Host` header (and `X-Forwarded-Proto` when `TRUST_PROXY=1`). It must match `APP_API` in `frontend/config.js`. |
 | `PORT`, `HOST`    | Default `3000` / `0.0.0.0`. Render sets PORT itself. |
 | `RATE_LIMIT`      | Requests per IP per minute (default 600). |
 | `ALLOW_PRIVATE=1` | Testing only: lets the server reach internal networks. Any other value (including `on`) is ignored. |
@@ -22,22 +22,23 @@ Split into two deployable parts:
 Endpoints: `POST /api/auth`, `GET /api/session`, `GET|POST /proxy`, `GET /inject.js`, `GET /health`.
 Every response carries `X-Robots-Tag: noindex, nofollow`.
 
-### How pages are shown (htmx)
+### How pages are shown
 
-The frontend no longer uses an iframe. It loads each page with [htmx](https://htmx.org) (`frontend/htmx.min.js`, self-hosted)
-and shows it in a shadow root inside its own document, so the site's CSS can't restyle the interface and vice versa.
+The frontend loads each page in an iframe sandboxed with `allow-scripts allow-forms` and **without**
+`allow-same-origin`. The backend rewrites the page's resource URLs and injects `inject.js` before the site's scripts, so
+JavaScript, links, forms, and dynamic requests continue through the proxy. The page has an opaque origin and cannot access
+the Pear Proxy interface or its saved sign-in. Popups, top-level navigation, downloads, and persistent browser storage are
+restricted; some sites that depend on those features may not work.
 
-- `GET /proxy?url=&t=&__pf=1` returns an HTML **fragment**: the page's styles plus its `<body>`. The real address and title
-  come back in an `HX-Trigger: {"proxy-nav": {...}}` header, which drives the address bar and back/forward buttons.
-- Links become `hx-get`, forms become `hx-get`/`hx-post`; every image, stylesheet and font URL is absolute (see `PUBLIC_URL`).
-- Without `__pf=1`, `/proxy` still returns the old full-page rewrite (with `inject.js`), e.g. for "open in new tab".
+The browser does not allow scripts to replace `location`, so a site that assigns to it directly may navigate within the
+sandboxed frame without going through the proxy. The sandbox still prevents that page from reaching the Pear Proxy UI or
+navigating the top-level tab.
 
-**Pages run without their JavaScript.** There is no sandbox any more, so the backend removes `<script>`, inline `on*` handlers,
-`javascript:` URLs, frames, plugins and any `hx-*` attributes from the site, and the frontend's CSP (`script-src 'self'`) and
-`htmx.config` (`allowScriptTags`/`allowEval` off, requests only to the backend) back that up. If you add anything to
-`rewriteFragment()` in `server.js`, keep it deny-by-default: a missed attribute would run with access to the saved sign-in.
-Sites that need JavaScript to show anything (web apps, many logins) will appear empty or partial. The `html`/`body` rules in a
-page's CSS are redirected to a wrapper element, which covers most sites but not every selector.
+The backend's Content Security Policy applies the same sandbox and limits page resources and connections to the proxy.
+The iframe also has a sandbox attribute as defense in depth. Do not add `allow-same-origin` or top-navigation permissions.
+
+`GET /proxy?url=&t=&__pf=1` remains available to older clients as a script-free HTML fragment. The Pear Proxy interface
+uses the full-page, sandboxed route instead.
 
 ### Internal network protection
 
