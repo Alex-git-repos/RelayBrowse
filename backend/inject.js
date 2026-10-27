@@ -158,13 +158,47 @@
   // The server rewrites every import() in scripts it serves to __PXI(<script's real URL>, spec).
   // Relative names resolve against the script's real address and then go through the proxy;
   // bare names (import maps) and data:/blob: URLs are passed on unchanged.
+  // The result must be absolute: inside the sandbox, import() called from a script that
+  // came from another origin has no base URL, so "/proxy?url=..." would not resolve.
+  function absProx(u) {
+    try { return new URL(prox(u), SELF_ORIGIN || location.href).href; } catch (e) { return String(u); }
+  }
   window.__PXI = function (base, spec, opts) {
     var s = String(spec);
     if (/^(?:\.{0,2}\/|[a-z][a-z0-9+.-]*:\/\/)/i.test(s)) {
-      try { s = prox(new URL(s, base).href); } catch (e) { /* let import() report it */ }
+      try { s = absProx(new URL(s, base).href); } catch (e) { /* let import() report it */ }
     }
     return opts === undefined ? import(s) : import(s, opts);
   };
+
+  /* ---------------- web workers ---------------- */
+
+  // A worker script must be same-origin with its page, which an opaque sandbox never is, so
+  // the real script is loaded from a tiny blob worker. Classic workers also get fetch() and
+  // importScripts() routed through the proxy, since a blob: base can't resolve relative URLs.
+  ['Worker', 'SharedWorker'].forEach(function (n) {
+    var Native = window[n];
+    if (!Native) return;
+    var Wrapped = function (url, opts) {
+      var u = String(url);
+      if (!SKIP.test(u)) {
+        var code;
+        if (opts && opts.type === 'module') {
+          code = 'import ' + JSON.stringify(absProx(u)) + ';';
+        } else {
+          code = '(function(){var B=' + JSON.stringify(BASE) + ',P=' + JSON.stringify(SELF_ORIGIN) + ',T=' + JSON.stringify(TOKEN) + ';' +
+            'function px(u){try{if(String(u).indexOf(P+"/proxy?")===0)return u;return P+"/proxy?url="+encodeURIComponent(new URL(u,B).href)+"&t="+T}catch(e){return u}}' +
+            'var is=self.importScripts;self.importScripts=function(){return is.apply(self,[].map.call(arguments,px))};' +
+            'var f=self.fetch;self.fetch=function(i,o){return f.call(self,(typeof i==="string"||i instanceof URL)?px(i):i,o)};' +
+            'importScripts(' + JSON.stringify(absProx(u)) + ');})();';
+        }
+        try { u = URL.createObjectURL(new Blob([code], { type: 'text/javascript' })); } catch (e) { /* fall through */ }
+      }
+      return new Native(u, opts);
+    };
+    Wrapped.prototype = Native.prototype;
+    window[n] = Wrapped;
+  });
 
   /* ---------------- network ---------------- */
 
@@ -200,7 +234,42 @@
   ['RTCPeerConnection', 'webkitRTCPeerConnection', 'RTCDataChannel', 'WebTransport'].forEach(function (n) {
     try { Object.defineProperty(window, n, { value: undefined, configurable: false, writable: false }); } catch (e) { /* ignore */ }
   });
-  window.WebSocket = function () { throw new DOMException('WebSockets are disabled', 'SecurityError'); };
+  // The proxy can't carry WebSockets. Instead of throwing (which crashes scripts that never
+  // expected "new WebSocket" to fail), behave like a connection that couldn't be made, so
+  // the page's own error/reconnect handling runs.
+  if (window.WebSocket && window.EventTarget) {
+    var WS_STATES = { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 };
+    var fireWs = function (ws, type, init) {
+      var ev;
+      try { ev = type === 'close' ? new CloseEvent('close', init) : new Event(type); } catch (e) { ev = new Event(type); }
+      try { ws.dispatchEvent(ev); } catch (e) { /* ignore */ }
+      var h = ws['on' + type];
+      if (typeof h === 'function') { try { h.call(ws, ev); } catch (e) { /* the page's handler failed, not us */ } }
+    };
+    var BlockedWebSocket = function (url) {
+      var ws = Reflect.construct(EventTarget, [], BlockedWebSocket);
+      ws.url = String(url); ws.readyState = 0; ws.bufferedAmount = 0; ws.extensions = ''; ws.protocol = ''; ws.binaryType = 'blob';
+      ws.onopen = ws.onerror = ws.onclose = ws.onmessage = null;
+      setTimeout(function () {
+        ws.readyState = 3;
+        fireWs(ws, 'error');
+        fireWs(ws, 'close', { code: 1006, reason: '', wasClean: false });
+      }, 0);
+      return ws;
+    };
+    BlockedWebSocket.prototype = Object.create(EventTarget.prototype, {
+      constructor: { value: BlockedWebSocket, writable: true, configurable: true },
+      send: { value: function () { if (this.readyState === 0) throw new DOMException('Still in CONNECTING state.', 'InvalidStateError'); }, writable: true, configurable: true },
+      close: { value: function () { this.readyState = 3; }, writable: true, configurable: true },
+    });
+    Object.keys(WS_STATES).forEach(function (k) {
+      BlockedWebSocket[k] = WS_STATES[k];
+      Object.defineProperty(BlockedWebSocket.prototype, k, { value: WS_STATES[k] });
+    });
+    window.WebSocket = BlockedWebSocket;
+  } else {
+    window.WebSocket = function () { throw new DOMException('WebSockets are disabled', 'SecurityError'); };
+  }
   if (window.EventSource) {
     var NativeES = window.EventSource;
     var ProxiedES = function (u, o) { return new NativeES(prox(u), o); };

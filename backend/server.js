@@ -46,9 +46,9 @@ const TRUST_PROXY = process.env.TRUST_PROXY === '1';
 const ALLOW_PRIVATE = process.env.ALLOW_PRIVATE === '1';
 
 const MAX_RESPONSE_BYTES = 25 * 1024 * 1024; // cap on any upstream response
-const MAX_REWRITE_BYTES = 8 * 1024 * 1024; // cap on HTML/CSS we rewrite in memory
+const MAX_REWRITE_BYTES = 16 * 1024 * 1024; // cap on HTML/CSS/JS we rewrite in memory
 const MAX_REQUEST_BODY = 1 * 1024 * 1024; // cap on form posts
-const UPSTREAM_TIMEOUT_MS = 25_000;
+const UPSTREAM_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS) || 25_000;
 const ALLOWED_PORTS = new Set([80, 443, 8080, 8443]);
 
 /* ------------------------------------------------------------------ */
@@ -535,11 +535,13 @@ function nonHtmlFragment(type, abs, origin) {
 const FORWARD_RESPONSE_HEADERS =['content-type', 'cache-control', 'last-modified', 'etag', 'content-language', 'content-disposition'];
 
 // Every proxied response is locked into a sandbox: opaque origin (no access to
-// the proxy UI, its storage or other sites), no top navigation, no popups,
-// no downloads/modals, and the browser may only load from this server.
+// the proxy UI, its storage or other sites), no top navigation, no popups, and
+// the browser may only load from this server. Inside that box the policy is kept
+// loose on purpose (data:/blob: everywhere, workers, modals, downloads) so that
+// ordinary sites' styles and scripts run without tripping over it.
 const ISOLATION_HEADERS = {
-  'Content-Security-Policy': `sandbox allow-scripts allow-forms; default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-src 'self'; form-action 'self'; base-uri 'none'; object-src 'none'; frame-ancestors ${FRONTEND_ORIGIN || '*'}`,
-  'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), display-capture=(), usb=(), serial=(), hid=(), bluetooth=(), payment=(), clipboard-read=(), clipboard-write=(), publickey-credentials-get=(), midi=(), accelerometer=(), gyroscope=(), magnetometer=(), idle-detection=(), screen-wake-lock=()',
+  'Content-Security-Policy': `sandbox allow-scripts allow-forms allow-modals allow-downloads; default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; style-src 'self' 'unsafe-inline' data: blob:; worker-src 'self' data: blob:; connect-src 'self' data: blob:; frame-src 'self' data: blob:; form-action 'self'; base-uri 'self'; object-src 'none'; frame-ancestors ${FRONTEND_ORIGIN || '*'}`,
+  'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), display-capture=(), usb=(), serial=(), hid=(), bluetooth=(), payment=(), clipboard-read=(), publickey-credentials-get=()',
   'Cross-Origin-Resource-Policy': 'cross-origin',
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, HEAD, POST, OPTIONS',
@@ -597,6 +599,10 @@ async function handleProxy(req, res, reqUrl) {
     'accept-language': 'en-US,en;q=0.9',
     'accept-encoding': 'identity',
   };
+  // The site's own address, never anything about the visitor. Many CDNs and form handlers
+  // refuse requests that arrive with no Referer/Origin at all.
+  headers.referer = target.origin + '/';
+  if (req.method === 'POST') headers.origin = target.origin;
   if (body && req.headers['content-type']) headers['content-type'] = req.headers['content-type'];
   if (req.headers.range) headers.range = req.headers.range; // lets audio/video seek
 
@@ -617,6 +623,10 @@ async function handleProxy(req, res, reqUrl) {
     if (/ENOTFOUND|EAI_AGAIN/.test(cause)) return errorPage(res, 502, 'Site not found', `Couldn\u2019t find ${target.hostname}. Check the spelling.`);
     return errorPage(res, 502, 'Couldn\u2019t reach the site', cause || 'The connection failed.');
   }
+
+  // The timer only guards "no response yet". Once headers are in, a long download, video or
+  // event stream must not be cut off at 25 seconds (a stalled body still hits undici's own timeout).
+  clearTimeout(timer);
 
   try {
     // Send redirects back through the proxy so each hop is validated again.
@@ -653,7 +663,10 @@ async function handleProxy(req, res, reqUrl) {
     }
 
     if (rewritable && upstream.body && req.method !== 'HEAD' && upstream.status !== 206) {
-      const buf = await readLimited(upstream.body, MAX_REWRITE_BYTES);
+      // Pages and stylesheets are buffered, so a stalled body gets its own deadline.
+      const bodyTimer = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+      let buf;
+      try { buf = await readLimited(upstream.body, MAX_REWRITE_BYTES); } finally { clearTimeout(bodyTimer); }
       const text = decodeBody(buf, contentType, isHtml);
       let rewritten;
       if (isHtml && fragment) {

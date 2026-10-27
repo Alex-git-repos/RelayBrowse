@@ -17,6 +17,7 @@ Split into two deployable parts:
 | `PUBLIC_URL`      | The backend's own public address (e.g. `https://relaybrowse.onrender.com`). Used by fragment responses; if unset it is taken from the request's `Host` header (and `X-Forwarded-Proto` when `TRUST_PROXY=1`). It must match `APP_API` in `frontend/config.js`. |
 | `PORT`, `HOST`    | Default `3000` / `0.0.0.0`. Render sets PORT itself. |
 | `RATE_LIMIT`      | Requests per IP per minute (default 600). |
+| `UPSTREAM_TIMEOUT_MS` | How long to wait for a site to start responding (default 25000). Long downloads and streams are not cut off once they have started. |
 | `ALLOW_PRIVATE=1` | Testing only: lets the server reach internal networks. Any other value (including `on`) is ignored. |
 
 Endpoints: `POST /api/auth`, `GET /api/session`, `GET|POST /proxy`, `GET /inject.js`, `GET /health`.
@@ -24,11 +25,13 @@ Every response carries `X-Robots-Tag: noindex, nofollow`.
 
 ### How pages are shown
 
-The frontend loads each page in an iframe sandboxed with `allow-scripts allow-forms` and **without**
-`allow-same-origin`. The backend rewrites the page's resource URLs and injects `inject.js` before the site's scripts, so
-JavaScript, links, forms, and dynamic requests continue through the proxy. The page has an opaque origin and cannot access
-the Pear Proxy interface or its saved sign-in. Popups, top-level navigation, downloads, and persistent browser storage are
-restricted; some sites that depend on those features may not work.
+The frontend loads each page in an iframe sandboxed with `allow-scripts allow-forms allow-modals allow-downloads` and
+**without** `allow-same-origin`. The backend rewrites the page's resource URLs and injects `inject.js` before the site's
+scripts, so JavaScript (including modules, dynamic `import()` and web workers), stylesheets, links, forms, and dynamic
+requests continue through the proxy. The page has an opaque origin and cannot access the Pear Proxy interface or its saved
+sign-in. Popups, top-level navigation, and persistent browser storage are restricted (storage is replaced by in-memory
+stand-ins); WebSockets are not carried by the proxy and fail like an unreachable server, so sites that depend on them or on
+cookies may not fully work.
 
 The browser does not allow scripts to replace `location`, so a site that assigns to it directly may navigate within the
 sandboxed frame without going through the proxy. The sandbox still prevents that page from reaching the Pear Proxy UI or
