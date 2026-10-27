@@ -148,7 +148,13 @@ const enc = (s) => encodeURIComponent(s).replace(/[!'()*]/g, (c) => '%' + c.char
 // Pages run in a sandbox with no cookies, so each proxied URL carries a
 // capability token (derived from AUTH_TOKEN, useless for anything else).
 const FRAME_TOKEN = crypto.createHmac('sha256', AUTH_TOKEN).update('relay-frame-v1').digest('hex');
-const prox = (absUrl) => '/proxy?url=' + enc(absUrl) + '&t=' + FRAME_TOKEN;
+// The #fragment stays outside the url= parameter, where the browser can see it: that keeps
+// "page#section" jumps working and lets <use href="sprite.svg#icon"> find its symbol.
+// `extra` (e.g. "&__pf=1") goes before the fragment so it stays part of the query.
+const prox = (absUrl, extra = '') => {
+  const i = absUrl.indexOf('#');
+  return '/proxy?url=' + enc(i < 0 ? absUrl : absUrl.slice(0, i)) + '&t=' + FRAME_TOKEN + extra + (i < 0 ? '' : absUrl.slice(i));
+};
 
 const SKIP = /^\s*(#|javascript:|data:|mailto:|tel:|blob:|about:)/i;
 
@@ -216,7 +222,9 @@ function decodeBody(buf, contentType, isHtml) {
 /** html/body/:root rules mean nothing inside a shadow root; point them at the wrapper div instead. */
 function scopeCss(css) {
   return css.replace(/([^{};]+)\{/g, (m, sel) =>
-    sel.replace(/(^|[\s,>+~(])(?:html|body|:root)(?![\w-])/g, '$1.pv-doc').replace(/\.pv-doc\s+\.pv-doc/g, '.pv-doc') + '{');
+    sel.replace(/(^|[\s,>+~(])(?:html|body|:root)(?![\w-])/g, '$1.pv-doc')
+      // "html[lang=en] body" -> ".pv-doc[lang=en] .pv-doc" would match nothing; both are the wrapper.
+      .replace(/(\.pv-doc(?:\[[^\]]*\]|:[\w-]+(?:\([^)]*\))?|\.[\w-]+)*)\s+\.pv-doc(?![\w-])/g, '$1') + '{');
 }
 
 // opts.origin: prefix for URLs that end up in a page on another origin (htmx fragments).
@@ -226,7 +234,7 @@ function rewriteCss(css, base, opts = {}) {
   const swap = (u, extra = '') => {
     if (u.startsWith('/proxy?url=') || (origin && u.startsWith(origin + '/proxy?url='))) return null; // already ours
     const abs = resolveUrl(u, base);
-    return abs ? origin + prox(abs) + extra : null;
+    return abs ? origin + prox(abs, extra) : null;
   };
   const impExtra = opts.scoped ? '&__ps=1' : ''; // an @imported stylesheet needs scoping too
   const out = css
@@ -312,6 +320,7 @@ const URL_ATTRS = [
   ['script', 'src'], ['img', 'src'], ['source', 'src'], ['video', 'src'],
   ['video', 'poster'], ['audio', 'src'], ['track', 'src'], ['iframe', 'src'],
   ['frame', 'src'], ['embed', 'src'], ['input', 'src'], ['object', 'data'],
+  ['use', 'href'], ['use', 'xlink:href'], // external SVG sprites: <use href="icons.svg#home">
 ];
 
 function rewriteHtml(html, pageUrl) {
@@ -442,7 +451,7 @@ function rewriteFragment(html, pageUrl, origin) {
   let base = pageUrl;
   const baseTag = $('base[href]').first();
   if (baseTag.length) { try { base = new URL(baseTag.attr('href'), pageUrl).href; } catch { /* ignore */ } }
-  const P = (abs, extra = '') => origin + prox(abs) + extra;
+  const P = (abs, extra = '') => origin + prox(abs, extra);
 
   $('noscript').each((_, el) => { $(el).replaceWith($(el).contents()); });
   const title = $('title').first().text().replace(/\s+/g, ' ').trim().slice(0, 120);
@@ -826,10 +835,21 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, HOST, () => {
-  console.log(`Pear Proxy backend listening on http://${HOST}:${PORT}`);
-  if (ALLOW_PRIVATE) console.warn('WARNING: ALLOW_PRIVATE=1, private network targets are reachable. Use for testing only.');
-  else if (process.env.ALLOW_PRIVATE) console.warn(`Note: ALLOW_PRIVATE="${process.env.ALLOW_PRIVATE}" is ignored. Only the exact value 1 enables it; private targets stay blocked.`);
-  if (GENERATED_TOKEN) console.warn(`WARNING: AUTH_TOKEN is not set. Using a random key for this run only: ${AUTH_TOKEN}`);
-  if (!FRONTEND_ORIGIN) console.warn('WARNING: FRONTEND_ORIGIN is not set; CORS and framing are open to any site.');
-});
+// Started only when run directly (`node server.js`); tests require() this file and
+// use the exports below without opening a port of their own.
+if (require.main === module) {
+  server.listen(PORT, HOST, () => {
+    console.log(`Pear Proxy backend listening on http://${HOST}:${PORT}`);
+    if (ALLOW_PRIVATE) console.warn('WARNING: ALLOW_PRIVATE=1, private network targets are reachable. Use for testing only.');
+    else if (process.env.ALLOW_PRIVATE) console.warn(`Note: ALLOW_PRIVATE="${process.env.ALLOW_PRIVATE}" is ignored. Only the exact value 1 enables it; private targets stay blocked.`);
+    if (GENERATED_TOKEN) console.warn(`WARNING: AUTH_TOKEN is not set. Using a random key for this run only: ${AUTH_TOKEN}`);
+    if (!FRONTEND_ORIGIN) console.warn('WARNING: FRONTEND_ORIGIN is not set; CORS and framing are open to any site.');
+  });
+}
+
+module.exports = {
+  server, FRAME_TOKEN, AUTH_TOKEN,
+  unmap, isBlockedAddress, checkTarget, esc, enc, prox, resolveUrl, decodeBody,
+  scopeCss, rewriteCss, modSpec, rewriteJs, rewriteImportMap, mapSrcset, effectiveType,
+  rewriteHtml, rewriteFragment, nonHtmlFragment, navHeader, safeEqual,
+};

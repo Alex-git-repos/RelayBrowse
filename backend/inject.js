@@ -45,7 +45,10 @@
         // Built from location.origin (which is the proxy's): re-point it at the real site.
         abs = new URL(abs.pathname + abs.search + abs.hash, BASE);
       }
-      return '/proxy?url=' + enc(abs.href) + '&t=' + TOKEN;
+      // Keep the #fragment outside url= (same as the server) so anchors and <use href="x.svg#id"> work.
+      var h = abs.hash;
+      abs.hash = '';
+      return '/proxy?url=' + enc(abs.href) + '&t=' + TOKEN + h;
     } catch (e) { return s; }
   }
 
@@ -336,7 +339,7 @@
   // element's own "src", a data-* style attribute) is left alone.
   var ATTRS = {
     src: /^(script|img|iframe|frame|embed|source|track|video|audio|input)$/,
-    href: /^(a|area|link|image)$/,
+    href: /^(a|area|link|image|use)$/,
     poster: /^video$/,
     data: /^object$/,
   };
@@ -367,7 +370,7 @@
   Element.prototype.setAttribute = function (name, value) {
     var n = String(name).toLowerCase(), tag = this.localName;
     if (has.call(ATTRS, n) && ATTRS[n].test(tag)) value = prox(value);
-    else if (n === 'xlink:href' && tag === 'image') value = prox(value);
+    else if (n === 'xlink:href' && (tag === 'image' || tag === 'use')) value = prox(value);
     else if (n === 'srcset' && (tag === 'img' || tag === 'source')) value = proxSrcset(value);
     else if (n === 'style') value = proxCss(value);
     return nativeSetAttribute.call(this, name, value);
@@ -437,7 +440,7 @@
       v = el.getAttribute(n); p = prox(v);
       if (p !== v) nativeSetAttribute.call(el, n, p);
     }
-    if (tag === 'image' && el.hasAttribute('xlink:href')) {
+    if ((tag === 'image' || tag === 'use') && el.hasAttribute('xlink:href')) {
       v = el.getAttribute('xlink:href'); p = prox(v);
       if (p !== v) nativeSetAttribute.call(el, 'xlink:href', p);
     }
@@ -459,7 +462,7 @@
 
   // Content added with innerHTML / insertAdjacentHTML never passed through the server's rewriter.
   var SELECTOR = 'a[href],area[href],link[href],script[src],img[src],img[srcset],source[src],source[srcset],' +
-    'video[src],video[poster],audio[src],track[src],iframe[src],frame[src],embed[src],object[data],input[src],image[href],[style]';
+    'video[src],video[poster],audio[src],track[src],iframe[src],frame[src],embed[src],object[data],input[src],image[href],use[href],use[*|href],[style]';
   if (window.MutationObserver) {
     new MutationObserver(function (records) {
       for (var i = 0; i < records.length; i++) {
