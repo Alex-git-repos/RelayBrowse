@@ -1,39 +1,138 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex, nofollow, noarchive, nosnippet, noimageindex">
-<meta name="referrer" content="no-referrer">
-<title>Sign in</title>
-<link rel="icon" href="data:,">
-<style>
-:root{color-scheme:light dark;--bg:#f6f6f6;--card:#fff;--ink:#222;--muted:#767676;--line:#d4d4d4;--btn:#333;--btn-ink:#fff;--err:#b3261e}
-@media (prefers-color-scheme:dark){:root{--bg:#161616;--card:#1f1f1f;--ink:#e6e6e6;--muted:#9a9a9a;--line:#3a3a3a;--btn:#e6e6e6;--btn-ink:#161616;--err:#ff8a80}}
-*,*::before,*::after{box-sizing:border-box}
-html,body{height:100%}
-body{margin:0;display:grid;place-items:center;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
-main{width:min(92vw,340px);background:var(--card);border:1px solid var(--line);border-radius:10px;padding:28px 24px}
-h1{margin:0 0 18px;font-size:1.25rem;font-weight:600}
-label{display:block;margin-bottom:6px;color:var(--muted);font-size:.9rem}
-input{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:6px;background:transparent;color:inherit;font:inherit}
-input:focus-visible,button:focus-visible{outline:2px solid currentColor;outline-offset:2px}
-button{width:100%;margin-top:14px;padding:10px 12px;border:0;border-radius:6px;background:var(--btn);color:var(--btn-ink);font:inherit;font-weight:600;cursor:pointer}
-button:disabled{opacity:.6;cursor:default}
-#m{min-height:1.5em;margin:12px 0 0;color:var(--err);font-size:.9rem}
-</style>
-</head>
-<body>
-<main>
-  <h1>Sign in</h1>
-  <form id="f" autocomplete="off">
-    <label for="k">Passcode</label>
-    <input id="k" type="password" autocomplete="current-password" spellcheck="false" autocapitalize="off" required>
-    <button id="b" type="submit">Continue</button>
-  </form>
-  <p id="m" role="status" aria-live="polite"></p>
-</main>
-<script src="../config.js"></script>
-<script src="a.js"></script>
-</body>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="robots"
+      content="noindex, nofollow, noarchive, nosnippet, noimageindex"
+    />
+    <meta name="referrer" content="no-referrer" />
+    <title>Enter a Pear one-time code to log into Pear Edu Services</title>
+    <link rel="icon" href="data:," />
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f6f6f6;
+        --card: #fff;
+        --ink: #222;
+        --muted: #767676;
+        --line: #d4d4d4;
+        --btn: #333;
+        --btn-ink: #fff;
+        --err: #b3261e;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #161616;
+          --card: #1f1f1f;
+          --ink: #e6e6e6;
+          --muted: #9a9a9a;
+          --line: #3a3a3a;
+          --btn: #e6e6e6;
+          --btn-ink: #161616;
+          --err: #ff8a80;
+        }
+      }
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        height: 100%;
+      }
+      body {
+        margin: 0;
+        display: grid;
+        place-items: center;
+        background: var(--bg);
+        color: var(--ink);
+        font:
+          16px/1.5 system-ui,
+          -apple-system,
+          "Segoe UI",
+          sans-serif;
+      }
+      main {
+        width: min(92vw, 340px);
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 28px 24px;
+      }
+      h1 {
+        margin: 0 0 18px;
+        font-size: 1.25rem;
+        font-weight: 600;
+      }
+      label {
+        display: block;
+        margin-bottom: 6px;
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+      input {
+        width: 100%;
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: transparent;
+        color: inherit;
+        font: inherit;
+      }
+      input:focus-visible,
+      button:focus-visible {
+        outline: 2px solid currentColor;
+        outline-offset: 2px;
+      }
+      button {
+        width: 100%;
+        margin-top: 14px;
+        padding: 10px 12px;
+        border: 0;
+        border-radius: 6px;
+        background: var(--btn);
+        color: var(--btn-ink);
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.6;
+        cursor: default;
+      }
+      #m {
+        min-height: 1.5em;
+        margin: 12px 0 0;
+        color: var(--err);
+        font-size: 0.9rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Enter a Pear one-time code to log into Pear Edu Services</h1>
+      <h3>
+        THIS IS NOT A PHISHING SITE. TO KNOW IF YOU ARE ON A LEGITIMATE SITE,
+        CHECK THE URL IN YOUR BROWSER'S ADDRESS BAR.
+      </h3>
+      <form id="f" autocomplete="off">
+        <label for="k">Passcode</label>
+        <input
+          id="k"
+          type="password"
+          autocomplete="current-password"
+          spellcheck="false"
+          autocapitalize="off"
+          required
+        />
+        <button id="b" type="submit">Continue</button>
+      </form>
+      <p id="m" role="status" aria-live="polite"></p>
+    </main>
+    <script src="../config.js"></script>
+    <script src="a.js"></script>
+  </body>
 </html>
