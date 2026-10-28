@@ -130,10 +130,11 @@ test('proxy: unsupported methods are 405', async () => {
   assert.equal((await get(purl(UU + '/html'), { method: 'DELETE' })).status, 405);
   assert.equal((await get(purl(UU + '/html'), { method: 'PUT', body: 'x' })).status, 405);
 });
-test('proxy: OPTIONS preflight is 204 with CORS', async () => {
-  const r = await get(purl(UU + '/html'), { method: 'OPTIONS' });
+test('proxy: OPTIONS preflight is 204 with credentialed CORS', async () => {
+  const r = await get(purl(UU + '/html'), { method: 'OPTIONS', headers: { Origin: 'https://front.test' } });
   assert.equal(r.status, 204);
-  assert.equal(r.headers.get('access-control-allow-origin'), '*');
+  assert.equal(r.headers.get('access-control-allow-origin'), 'https://front.test');
+  assert.equal(r.headers.get('access-control-allow-credentials'), 'true');
 });
 
 /* ---------- proxy: content ---------- */
