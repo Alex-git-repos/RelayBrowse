@@ -552,16 +552,24 @@ const ISOLATION_HEADERS = {
   'Content-Security-Policy': `sandbox allow-scripts allow-forms allow-modals allow-downloads; default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; style-src 'self' 'unsafe-inline' data: blob:; worker-src 'self' data: blob:; connect-src 'self' data: blob:; frame-src 'self' data: blob:; form-action 'self'; base-uri 'self'; object-src 'none'; frame-ancestors ${FRONTEND_ORIGIN || '*'}`,
   'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), display-capture=(), usb=(), serial=(), hid=(), bluetooth=(), payment=(), clipboard-read=(), publickey-credentials-get=()',
   'Cross-Origin-Resource-Policy': 'cross-origin',
-  'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, HEAD, POST, OPTIONS',
   'Access-Control-Allow-Headers': '*',
-  'Access-Control-Expose-Headers': 'HX-Trigger', // htmx reads the page's real address from it
+  'Access-Control-Allow-Credentials': 'true',
+  'Access-Control-Expose-Headers': 'HX-Trigger, Set-Cookie', // htmx reads the page's real address from it
   'Referrer-Policy': 'no-referrer',
   'X-Content-Type-Options': 'nosniff',
+  'Vary': 'Origin',
 };
+
+function applyProxyCors(req, res) {
+  // Credentialed fetch/XHR requests require an explicit, matching origin.
+  // Opaque sandboxed frames send "null" rather than the proxy origin.
+  res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
+}
 
 async function handleProxy(req, res, reqUrl) {
   for (const [k, v] of Object.entries(ISOLATION_HEADERS)) res.setHeader(k, v);
+  applyProxyCors(req, res);
   if (req.method === 'OPTIONS') { res.writeHead(204, { 'Access-Control-Max-Age': '600' }); return res.end(); }
   if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'POST') {
     return errorPage(res, 405, 'Method not allowed', 'This proxy supports GET and POST requests.');
@@ -603,9 +611,12 @@ async function handleProxy(req, res, reqUrl) {
 
   const headers = {
     // Fixed identity: nothing about the user's browser is passed to sites.
-    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"Windows"',
     accept: fragment ? 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8' : (req.headers.accept || '*/*'),
-    'accept-language': 'en-US,en;q=0.9',
+    'accept-language': req.headers['accept-language'] || 'en-US,en;q=0.9',
     'accept-encoding': 'identity',
   };
   // The site's own address, never anything about the visitor. Many CDNs and form handlers

@@ -33,6 +33,9 @@ sign-in. Popups, top-level navigation, and persistent browser storage are restri
 stand-ins); WebSockets are not carried by the proxy and fail like an unreachable server, so sites that depend on them or on
 cookies may not fully work.
 
+The injected runtime presents a consistent desktop Chrome identity and handles credentialed cross-origin fetches and
+XHR requests from the opaque frame. This is JavaScript-only browser compatibility emulation; WebAssembly is not required.
+
 The browser does not allow scripts to replace `location`, so a site that assigns to it directly may navigate within the
 sandboxed frame without going through the proxy. The sandbox still prevents that page from reaching the Pear Proxy UI or
 navigating the top-level tab.

@@ -23,6 +23,31 @@
   var SELF_ORIGIN = '';
   try { SELF_ORIGIN = new URL(location.href).origin; } catch (e) { /* ignore */ }
 
+  // Keep the JavaScript identity consistent with the browser identity used for
+  // upstream requests. A sandboxed iframe otherwise advertises mixed platform
+  // values that bot checks and complex app bootstraps commonly reject.
+  var ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+  function navValue(name, value) {
+    try { Object.defineProperty(Navigator.prototype, name, { configurable: true, get: function () { return value; } }); }
+    catch (e) { /* ignore */ }
+  }
+  navValue('userAgent', ua);
+  navValue('appVersion', ua);
+  navValue('platform', 'Win32');
+  navValue('vendor', 'Google Inc.');
+  navValue('hardwareConcurrency', 8);
+  navValue('deviceMemory', 8);
+  navValue('maxTouchPoints', 0);
+  navValue('webdriver', false);
+  navValue('languages', ['en-US', 'en']);
+  navValue('language', 'en-US');
+  try {
+    Object.defineProperty(Navigator.prototype, 'userAgentData', {
+      configurable: true,
+      get: function () { return { brands: [{ brand: 'Google Chrome', version: '131' }, { brand: 'Chromium', version: '131' }, { brand: 'Not_A Brand', version: '24' }], mobile: false, platform: 'Windows', getHighEntropyValues: function () { return Promise.resolve({ platform: 'Windows', platformVersion: '15.0.0', architecture: 'x86', model: '', uaFullVersion: '131.0.0.0', fullVersionList: this.brands }); }; }; }
+    });
+  } catch (e) { /* ignore */ }
+
   var SKIP = /^\s*(#|javascript:|data:|blob:|mailto:|tel:|about:)/i;
   var OURS = /^\/proxy\?(?:url|__pa|__pt)=/;          // already points through the proxy
 
