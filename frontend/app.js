@@ -22,7 +22,7 @@
   function saveToken(t) { try { if (t) localStorage.setItem(TOKEN_KEY, t); else localStorage.removeItem(TOKEN_KEY); } catch (e) {} }
   var frameToken = loadToken();
 
-  function clearView() { view.src = 'about:blank'; }
+  function clearView() { view.innerHTML = ''; }
 
   // Not signed in: send the visitor to the sign-in page (APP_GATE in config.js). The "not available"
   // page stays visible only as a fallback if the redirect can't happen. An optional ?go= is carried
@@ -88,16 +88,93 @@
     fwdBtn.disabled = idx >= stack.length - 1;
   }
 
+    // Fast FNV-1a hash used to namespace class/id names of proxied content so they
+  // cannot collide with the shell's own classes and ids.
+  function fastHash(value) {
+    var h = 2166136261;
+    for (var i = 0; i < value.length; i++) {
+      h ^= value.charCodeAt(i);
+      h = Math.imul(h, 16777619) >>> 0;
+    }
+    return 'rb' + h.toString(36);
+  }
+  function hashToken(token) { return token ? fastHash(token) : token; }
+  function hashClassList(value) {
+    return String(value || '').split(/\s+/).filter(Boolean).map(hashToken).join(' ');
+  }
+  function hashCssText(css) {
+    return String(css || '').replace(/\.([A-Za-z_][\w-]*)/g, function (m, name) { return '.' + hashToken(name); })
+      .replace(/#([A-Za-z_][\w-]*)/g, function (m, name) { return '#' + hashToken(name); });
+  }
+  async function hashProxiedDocument(doc) {
+    // Stylesheets are fetched manually so their class/id selectors can be hashed too.
+    var links = Array.prototype.slice.call(doc.querySelectorAll('link[rel~="stylesheet"]'));
+    for (var i = 0; i < links.length; i++) {
+      var link = links[i];
+      var href = link.href;
+      if (!href) continue;
+      try {
+        var res = await fetch(href, { referrerPolicy: 'no-referrer' });
+        var css = await res.text();
+        var style = doc.createElement('style');
+        style.textContent = hashCssText(css);
+        link.parentNode.replaceChild(style, link);
+      } catch (e) { /* leave the link as-is if it cannot be fetched */ }
+    }
+    Array.prototype.slice.call(doc.querySelectorAll('[class]')).forEach(function (el) {
+      el.setAttribute('class', hashClassList(el.getAttribute('class')));
+    });
+    Array.prototype.slice.call(doc.querySelectorAll('[id]')).forEach(function (el) {
+      el.setAttribute('id', hashToken(el.getAttribute('id')));
+    });
+    // keep in-document id references working after renaming.
+    Array.prototype.slice.call(doc.querySelectorAll('[for],[href^="#"],[aria-labelledby],[aria-describedby]')).forEach(function (el) {
+      ['for', 'aria-labelledby', 'aria-describedby'].forEach(function (attr) {
+        var value = el.getAttribute(attr);
+        if (value) el.setAttribute(attr, value.split(/\s+/).map(hashToken).join(' '));
+      });
+      var href = el.getAttribute('href');
+      if (href && href.charAt(0) === '#') el.setAttribute('href', '#' + hashToken(href.slice(1)));
+    });
+    Array.prototype.slice.call(doc.querySelectorAll('style')).forEach(function (el) {
+      el.textContent = hashCssText(el.textContent);
+    });
   function open(url, fromStack) {
     locked.hidden = true; home.hidden = true; shell.hidden = false;
     addr.value = url;
     setLoading(true);
     if (!fromStack) { stack = stack.slice(0, idx + 1); stack.push(url); idx = stack.length - 1; }
     replaceNext = true; // the first report after a load may be the post-redirect address
-    view.src = API + '/proxy?url=' + encodeURIComponent(url) + '&t=' + encodeURIComponent(frameToken);
-    remember(url);
-    updateNav();
+    renderProxied(url).then(function () {
+      setLoading(false);
+      remember(url);
+      updateNav();
+    }).catch(function () {
+      setLoading(false);
+    });
   }
+  async function renderProxied(url) {
+    var r = await fetch(API + '/proxy?url=' + encodeURIComponent(url) + '&t=' + encodeURIComponent(frameToken), { referrerPolicy: 'no-referrer' });
+    var html = await r.text();
+    var parser = new DOMParser();
+    var doc = parser.parseFromString(html, 'text/html');
+    await hashProxiedDocument(doc);
+    // execute scripts by recreating them (DOMParser output is inert)
+    Array.prototype.slice.call(doc.querySelectorAll('script')).forEach(function (oldScript) {
+      var script = doc.createElement('script');
+      Array.prototype.slice.call(oldScript.attributes).forEach(function (attr) { script.setAttribute(attr.name, attr.value); });
+      script.textContent = oldScript.textContent;
+      oldScript.parentNode.replaceChild(script, oldScript);
+    });
+    clearView();
+    Array.prototype.slice.call(doc.head.querySelectorAll('style,link[rel="stylesheet"]')).forEach(function (node) { view.appendChild(node.cloneNode(true)); });
+    while (doc.body.firstChild) view.appendChild(doc.body.firstChild);
+    var titleEl = doc.querySelector('title');
+    if (titleEl && titleEl.textContent) {
+      document.title = titleEl.textContent.slice(0, 120) + ' – Pear Proxy';
+    }
+  }
+}
 
   function submit(raw, fromHome) {
     if (!frameToken) { toGate(); return; }
@@ -132,24 +209,22 @@
     b.addEventListener('click', function () { open(b.getAttribute('data-go')); });
   });
 
-  view.addEventListener('load', function () { setLoading(false); });
-
-  // The injected script reports navigation from this exact sandboxed frame.
-  window.addEventListener('message', function (e) {
-    if (e.source !== view.contentWindow) return;
-    var d = e.data;
-    if (!d || d.type !== 'proxy-nav' || typeof d.url !== 'string' || !/^https?:\/\//i.test(d.url)) return;
-    var url = d.url;
-    if (idx < 0) { stack = [url]; idx = 0; }
-    else if (url !== stack[idx]) {
-      if (replaceNext) stack[idx] = url;
-      else { stack = stack.slice(0, idx + 1); stack.push(url); idx = stack.length - 1; }
-    }
-    replaceNext = false;
-    if (document.activeElement !== addr) addr.value = url;
-    var title = typeof d.title === 'string' && d.title ? d.title.slice(0, 120) : label(url);
-    document.title = title + ' – Pear Proxy';
-    updateNav();
+  // Direct rendering: intercept link clicks and form submits inside the proxied content.
+  view.addEventListener('click', function (e) {
+    var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+    if (!a) return;
+    var href = a.getAttribute('href') || '';
+    if (/^(#|javascript:|mailto:|tel:|data:)/i.test(href)) return;
+    e.preventDefault();
+    try { open(new URL(href, API).href || href); } catch (err) { open(href); }
+  });
+  view.addEventListener('submit', function (e) {
+    var form = e.target;
+    if (!form || form.localName !== 'form') return;
+    e.preventDefault();
+    // fall back to navigating the form action through the proxy
+    var action = form.getAttribute('action') || location.href;
+    open(action);
   });
 
   renderRecent();
